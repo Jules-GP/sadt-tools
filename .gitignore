@@ -16,3 +16,5 @@ output/
 tools/*/tests/data/*
 !tools/*/tests/data/download.sh
 !tools/*/tests/data/*.sha256
+# How to obtain the fixtures is documentation, not a fixture.
+!tools/*/tests/data/README.md
