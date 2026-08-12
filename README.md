@@ -100,13 +100,18 @@ $ tools/_template/.venv/bin/python scripts/describe.py tools/_template
   "arguments": {
     "scans":      {"type": "path", "required": true},
     "output_dir": {"type": "path", "required": true},
-    "metrics":    {"type": "list[str]", "required": false, "default": ["mean", "max"]},
+    "metrics":    {"type": "list[str]", "required": false, "default": ["mean", "max"],
+                   "choices": ["mean", "max", "min", "std"]},
     ...
   },
   "returns": "path",
   "source_hash": "96ab3611..."
 }
 ```
+
+An argument annotated `Literal[...]` publishes its options as `choices`, so the
+client can render a picker without a second declaration to keep in step —
+`list[Literal[...]]` for several-of, a bare `Literal[...]` for exactly-one.
 
 It exits 2 on anything it cannot represent rather than emitting a schema that is
 almost right; `source_hash` is what lets the server notice a cached schema has

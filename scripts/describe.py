@@ -28,8 +28,10 @@ import typing
 from pathlib import Path
 
 # The whole annotation vocabulary. `Path` means "a file or a directory"; the
-# rest are scalars. Nothing else is allowed -- no Optional, no unions, no custom
-# marker types, nothing imported from the server.
+# rest are scalars. `Literal[...]` narrows a str or int to a fixed set of
+# options, which is published as `choices` so the client can render a picker.
+# Nothing else is allowed -- no Optional, no unions, no custom marker types,
+# nothing imported from the server.
 SCALARS = {
     Path: "path",
     str: "str",
@@ -49,17 +51,65 @@ ACCEPTED_DEFAULTS = {
 }
 
 
+# Literal values may only be these. PEP 586 also allows bytes, None and Enum
+# members; none of them survives a JSON round trip as an option a client can
+# render, so they are refused rather than silently stringified.
+LITERAL_TYPES = (str, int)
+
+
 class SchemaError(Exception):
     """The tool cannot be described. Always actionable, always fatal."""
 
 
+def literal_choices(annotation, where):
+    """The options of a `Literal[...]`, with the scalar type they narrow.
+
+    Returns `(type name, choices)`, or `(None, None)` when this is not a
+    Literal. A fixed set of options is a property of the argument, so it is
+    said once in the annotation rather than declared a second time in a table
+    that can drift from it -- which is exactly what the old `ArgSpec.choices`
+    did.
+    """
+    if typing.get_origin(annotation) is not typing.Literal:
+        return None, None
+
+    values = list(typing.get_args(annotation))
+    if not values:
+        raise SchemaError("{}: Literal[] has no options.".format(where))
+
+    kinds = set(type(value) for value in values)
+    # bool is a subclass of int, so Literal[True] would otherwise be published
+    # as an int option and rendered as a number.
+    if any(isinstance(value, bool) for value in values) or len(kinds) != 1:
+        raise SchemaError(
+            "{}: Literal options must all be str, or all be int. Got "
+            "{}.".format(where, ", ".join(sorted(k.__name__ for k in kinds)))
+        )
+    kind = kinds.pop()
+    if kind not in LITERAL_TYPES:
+        raise SchemaError(
+            "{}: Literal[{}] is not supported. Options must be str or "
+            "int.".format(where, kind.__name__)
+        )
+    # No duplicate check: typing.Literal collapses repeated options itself, so
+    # Literal["a", "a"] never reaches here as two.
+    return SCALARS[kind], values
+
+
 def type_name(annotation, where):
-    """Map an annotation onto its schema name, or refuse it."""
+    """Map an annotation onto its schema name, or refuse it.
+
+    Returns `(name, choices)`; `choices` is None unless a Literal narrowed it.
+    """
     try:
         if annotation in SCALARS:
-            return SCALARS[annotation]
+            return SCALARS[annotation], None
     except TypeError:
         pass  # an unhashable annotation is unsupported by definition
+
+    name, choices = literal_choices(annotation, where)
+    if name is not None:
+        return name, choices
 
     # Bare `list` is not a generic alias, so it never reaches the branch below.
     # It is a common enough slip to deserve its own message: without an element
@@ -72,21 +122,27 @@ def type_name(annotation, where):
 
     if typing.get_origin(annotation) is list:
         args = typing.get_args(annotation)
-        if len(args) == 1 and SCALARS.get(args[0]) is not None:
-            return "list[{}]".format(SCALARS[args[0]])
+        if len(args) == 1:
+            # `list[Literal[...]]` is the multi-select: several of a fixed set.
+            # A bare `Literal[...]` is the single-select. The two old schema
+            # types, "multichoice" and "choice", fall straight out of that.
+            element, choices = literal_choices(args[0], where)
+            if element is None and SCALARS.get(args[0]) is not None:
+                element = SCALARS[args[0]]
+            if element is not None:
+                return "list[{}]".format(element), choices
         raise SchemaError(
             "{}: list[{}] is not supported. Use list[str], list[int], "
-            "list[float], list[bool] or list[Path].".format(
+            "list[float], list[bool], list[Path] or list[Literal[...]].".format(
                 where, ", ".join(getattr(a, "__name__", str(a)) for a in args) or "..."
             )
         )
 
     raise SchemaError(
         "{}: unsupported annotation {!r}. Allowed: Path, str, int, float, bool, "
-        "list[...] of those. Optional/Union are not supported -- an argument is "
-        "optional because it has a default, not because it is typed that way.".format(
-            where, annotation
-        )
+        "Literal[...] of str or int, and list[...] of those. Optional/Union are "
+        "not supported -- an argument is optional because it has a default, not "
+        "because it is typed that way.".format(where, annotation)
     )
 
 
@@ -104,7 +160,7 @@ def return_name(annotation):
             "outputs, got {!r}.".format(annotation)
         )
 
-    name = type_name(annotation, "return annotation")
+    name, _choices = type_name(annotation, "return annotation")
     if name != "path":
         raise SchemaError(
             "run() must return a Path (or dict[str, Path]), not {}. Everything a "
@@ -113,7 +169,7 @@ def return_name(annotation):
     return name
 
 
-def check_default(name, kind, default):
+def check_default(name, kind, default, choices=None):
     """Validate a default against its annotation and make it JSON-ready."""
     if default is None:
         raise SchemaError(
@@ -127,7 +183,7 @@ def check_default(name, kind, default):
             raise SchemaError(
                 "argument '{}' is {} but defaults to {!r}.".format(name, kind, default)
             )
-        return [check_default(name, element, item) for item in default]
+        return [check_default(name, element, item, choices) for item in default]
 
     accepted = ACCEPTED_DEFAULTS[kind]
     # bool is a subclass of int, so `count: int = True` passes isinstance and
@@ -139,6 +195,14 @@ def check_default(name, kind, default):
     if not isinstance(default, accepted):
         raise SchemaError(
             "argument '{}' is {} but defaults to {!r}.".format(name, kind, default)
+        )
+
+    # A default outside its own option list is the quiet one: the client shows
+    # a picker that cannot produce the value the tool starts from.
+    if choices is not None and default not in choices:
+        raise SchemaError(
+            "argument '{}' defaults to {!r}, which is not one of its options "
+            "({}).".format(name, default, ", ".join(repr(c) for c in choices))
         )
 
     if kind == "path":
@@ -178,13 +242,20 @@ def describe_run(run):
         if name not in hints:
             raise SchemaError("argument '{}' has no annotation.".format(name))
 
-        kind = type_name(hints[name], "argument '{}'".format(name))
+        kind, choices = type_name(hints[name], "argument '{}'".format(name))
         # The absence of a default is the ONLY thing that makes an argument
         # required. There is no `required=` to contradict it.
         required = parameter.default is parameter.empty
         arguments[name] = {"type": kind, "required": required}
         if not required:
-            arguments[name]["default"] = check_default(name, kind, parameter.default)
+            arguments[name]["default"] = check_default(
+                name, kind, parameter.default, choices
+            )
+        if choices is not None:
+            # Last, so adding options to an argument does not reorder the keys
+            # a reader is used to. `list[...]` means several may be chosen, a
+            # bare scalar means exactly one.
+            arguments[name]["choices"] = choices
 
     return {
         "description": doc.strip().splitlines()[0].strip(),
