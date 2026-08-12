@@ -1,0 +1,245 @@
+# What the server has to do
+
+Written for whoever works on
+[slicer-remote-tool-server](https://github.com/Jules-GP/slicer-remote-tool-server).
+It is the other half of the split: this repository holds tools that know nothing
+about the server, so everything they stopped doing, the server now does.
+
+Read it as a checklist. The items under "Work that moved to the server" are the
+ones that will bite, because in each case something used to happen and now
+nothing does.
+
+## 1. Discovery
+
+`scripts/describe.py` in this repository turns a tool's `run()` signature into
+the JSON the server publishes. Run it with the **tool's own interpreter** —
+importing a tool needs the tool's dependencies:
+
+```bash
+/tools/amasss/.venv/bin/python /tools/scripts/describe.py /tools/amasss
+```
+
+It is dependency-free and stays Python 3.9-compatible so it can run inside any
+tool venv, including one pinned to an old interpreter. It exits **2** with a
+message on stderr for anything it cannot represent, and prints nothing — treat a
+non-zero exit as "this tool is not loadable" and say so, rather than serving a
+partial schema.
+
+```json
+{
+  "name": "amasss",
+  "description": "Segment craniofacial structures on a CBCT scan.",
+  "arguments": {
+    "scans":      {"type": "path", "required": true},
+    "model":      {"type": "path", "required": true},
+    "output_dir": {"type": "path", "required": true},
+    "structures": {"type": "list[str]", "required": false,
+                   "default": ["MAND", "MAX", "CB", "CV", "UAW"],
+                   "choices": ["MAND", "MAX", "CB", "CV", "UAW", "SKIN",
+                               "CBMASK", "MANDMASK", "MAXMASK"]},
+    "device":     {"type": "str", "required": false, "default": "cuda",
+                   "choices": ["cuda", "cpu"]}
+  },
+  "returns": "path",
+  "source_hash": "966bf6d9…"
+}
+```
+
+Three things to build against:
+
+- **`required` comes only from the absence of a default.** There is no second
+  declaration that can disagree with the signature.
+- **`choices` is optional and means a fixed set.** `list[...]` with `choices` is
+  several-of (the old `multichoice`); a scalar with `choices` is exactly-one (the
+  old `choice`). Absent `choices`, the value is free-form.
+- **`source_hash` is a sha256 of the tool's `src/`.** Cache schemas against it
+  and regenerate when it moves; that is what it is for.
+
+**Argument order is the signature's order.** Render forms in it.
+
+## 2. Invocation
+
+```
+/tools/<name>/.venv/bin/python /opt/sadt/runner.py --job /jobs/<uuid>/job.json
+```
+
+`uv sync` installs each tool into its own venv, so `import sadt_<name>` works
+directly — no `sys.path` juggling needed, though adding `/tools/<name>/src`
+first is harmless and makes the runner work against an unsynced checkout too.
+
+**There is a working reference implementation of the runner in this repository**:
+[`testkit/src/sadt_testkit/_driver.py`](../testkit/src/sadt_testkit/_driver.py).
+It is ~60 lines, stdlib-only, and does exactly this job — import the package,
+coerce a JSON object into the arguments `run()` declares, call it, hand the paths
+back. It is what every tool's integration tests already run against, so if the
+server's runner behaves differently from it, the tests here pass while
+production fails. Copy it or keep the two in step deliberately.
+
+Two details from it worth carrying over:
+
+- **Coerce by annotation.** JSON has no path type, so paths arrive as strings and
+  must become `Path` for parameters annotated `Path` (or `list[Path]`).
+  `typing.get_type_hints(run)` is how the driver decides.
+- **Never parse the result off stdout.** These tools print progress bars, nnUNet
+  banners and shapeaxi chatter. The driver writes the result to a file whose path
+  it is given. Anything scraped from stdout breaks the first time a dependency
+  prints something new.
+
+`run()` returns a `Path` or a `dict[str, Path]`; `returns` in the schema says
+which. Today: `surgmovpred` returns `dict[str, path]` (`excel` and `csv`), the
+others return a `path` — the output directory they were given.
+
+## 3. Work that moved to the server
+
+Each of these used to happen inside a tool and now happens nowhere unless the
+server does it.
+
+### Unpacking archives
+
+No tool handles `.zip` any more. The server unpacks before calling `run()` and
+passes a real file or directory. Two behaviours have to come with it:
+
+- **the zip-bomb cap.** Tools used to apply `MAX_EXTRACTED_MB` themselves when
+  they received the archive directly (AMASSS, ALI, BatchDentalSeg, CrownSeg all
+  did). Nothing applies it now.
+- **`strip_single_root`.** Zipping `patients/` on any OS produces
+  `patients/<files>`, and callers want the files. AMASSS and ALI relied on this.
+
+### Capping GPU work
+
+**This is the one most likely to bite.** Every tool used to hold a
+`threading.BoundedSemaphore` — `AMASSS_MAX_GPU_JOBS`, `BATCHDENTALSEG_MAX_GPU_JOBS`,
+`CROWNSEG_MAX_GPU_JOBS`, `ALI_MAX_GPU_JOBS`, all defaulting to 1 — because every
+tool shared one server process. A tool is now its own process, so an in-process
+semaphore would cap nothing and they have all been removed.
+
+Nothing serialises GPU work any more. Two concurrent AMASSS jobs will both take
+the card. The server has to hold that limit, and it now has to be a limit
+*across* tools, not per tool: an AMASSS run and a CrownSeg run compete for the
+same device.
+
+### Creating and owning the output directory
+
+`output_dir` is a required argument on every tool. Create it (or let the tool —
+they all `mkdir(parents=True, exist_ok=True)`), pass it, and archive what comes
+back. Tools write **only** there; each has a test asserting it.
+
+Intermediates go in a dotted subdirectory that the tool removes before returning
+(`.amasss_work/`, `.batchdentalseg_work/`, `.crownseg_work/`). If one survives, a
+run crashed.
+
+### Resolving model weights
+
+Tools no longer touch `data_store` or `settings.CROWNSEG_MODEL`. The server
+resolves the name and passes a path — but **what kind of path differs per tool**:
+
+| Tool | `model` is | Note |
+|---|---|---|
+| `surgmovpred` | a folder | every `stacking_package.pkl` under it is loaded, recursively |
+| `amasss` | the bundle root | one subfolder per structure code (`MAND/`, `MAX/`, …); a single wrapper folder is descended into |
+| `batchdentalseg` | **the bundle folder itself** | its *name* selects the model and its label table — see below |
+| `crownseg` | a `.pth` file | not a folder |
+
+**`batchdentalseg` is the sharp edge**: the folder's basename must equal a key in
+its `catalogs.MODELS` (`DentalSegmentator`, `PediatricDentalSeg`,
+`NasoMaxillaDentSeg`, `UniversalLab`), which must in turn equal the folder
+`scripts/data-manifest.yml` downloads that bundle into. The server-side test that
+enforced that has no home any more — this repository cannot read the manifest.
+
+Also note the **slug case change**: tool directories here are lowercase
+(`amasss`, `batchdentalseg`, `crownseg`, `surgmovpred`) and that is what the
+schema's `name` is, while `DATA/` still uses `AMASSS/`, `BatchDentalSeg/`,
+`CrownSeg/`, `SurgMovPred/`. Map or rename; do not assume they match.
+
+### Configuring logging
+
+Tools use a plain module logger and attach no handlers — a library that
+configures logging takes the decision away from whatever runs it. The runner owns
+handlers, levels and formatting. Without that, tool logs go nowhere.
+
+### Settings that became arguments
+
+`run()` must not read the environment, so these moved into the signature with
+their previous defaults. The server passes them only to override:
+
+| Was | Now | Default |
+|---|---|---|
+| `settings.DEVICE` | `device` on every GPU tool | `"cuda"`, falls back to CPU with a warning |
+| `settings.AMASSS_TILE_STEP_SIZE` | `tile_step_size` (amasss) | `0.5` |
+| `settings.AMASSS_GPU_RESAMPLING` | `gpu_resampling` (amasss) | `true` |
+| `settings.BATCHDENTALSEG_TILE_STEP_SIZE` | `tile_step_size` (batchdentalseg) | `0.5` |
+| `settings.CROWNSEG_NUM_WORKERS` | `num_workers` (crownseg) | `2` |
+| `settings.*_MAX_GPU_JOBS` | — | gone; see "Capping GPU work" |
+
+`tile_step_size` and `gpu_resampling` **change the segmentation**. The tools
+record what was used in their run report, so a mask stays reproducible.
+
+## 4. Errors
+
+There is no shared exception type, because there is no shared package. Each tool
+defines its own `ToolInputError(ValueError)`, and `surgmovpred` deliberately kept
+upstream's `FileNotFoundError` / `RuntimeError` instead. So the server cannot
+`isinstance`-check the way `base.ToolArgumentError` allowed.
+
+**Map by exception class name.** The suggested convention, which the runner
+should write into its result file:
+
+```json
+{"error": {"type": "ToolInputError", "message": "Unknown structure code(s): RC. Known: MAND, MAX, …"}}
+```
+
+- `ToolInputError`, `ValueError`, `FileNotFoundError` → **422**, message passed
+  through: these always mean the request or the staged data is wrong, and every
+  message is written to be read by whoever sent it.
+- `ToolUnavailableError` → **503**: the tool is installed but its engine is not.
+  Only `crownseg` raises it today, when the `segmentation` extra is missing.
+- anything else → **500**, message not passed through.
+
+If you would rather not match on names, the alternative is a `type` field the
+tools set explicitly — but that is a shared convention either way, and names are
+already the convention.
+
+## 5. Sequencing tools
+
+Tools do not call each other. Where the old server had one tool importing
+another, the server now chains them:
+
+| Chain | Why | Handoff |
+|---|---|---|
+| `crownseg` → `ali` | ALI's IOS engine needs meshes carrying tooth labels. `ALILogic.ensure_segmented()` used to import CrownSeg directly. | CrownSeg's `run_report.json` has `segmented_meshes`: absolute paths of every mesh that now carries labels, whether this run produced them or found them already labelled. Feed those to ALI. |
+| `ali` → `aso` | ASO registers on landmarks ALI predicts. `aso/src/ali_client.py` used to call ALI through `registry.TOOLS`. | ALI's markups files (`*.mrk.json`). |
+
+CrownSeg passes an already-labelled mesh through untouched, so re-running the
+chain on mixed input is cheap and safe.
+
+**Neither ALI nor ASO is migrated yet**, so those two rows describe the target,
+not today.
+
+## 6. What to delete, and when
+
+Only after the corresponding tool's PR merges *here*, never before — the server
+keeps working off its own copy until this one is proven.
+
+Server-side, the whole `server/tools/` tree eventually goes, and with it the
+parts of `base.py` that only existed for it: `Tool`, `ArgSpec`, `Selection`,
+`ResolvedPath`, `FILE_TYPES`, `ToolArgumentError`, `ToolUnavailableError`, and
+`registry.py`'s import-every-tool-at-startup. What stays is `main.py`,
+`dispatch.py`, `runner.py`, `data_store.py`, `security.py`, `config.py`.
+
+`requirements.txt` loses every tool dependency — torch, nnunetv2, SimpleITK, vtk,
+itk, monai, dicom2nifti, pandas, scikit-learn, lightgbm, joblib, openpyxl, odfpy.
+Each now lives in one tool's lockfile. The server keeps only what the server
+itself imports.
+
+## 7. Two things to know before you start
+
+- **CrownSeg does not currently run, and did not before the migration.**
+  `shapeaxi.dental_model_seg` reads `DentalModelSeg` off `shapeaxi.saxi_nets`,
+  but in the whole 2.0.x line the class lives in `shapeaxi.saxi_nets_lightning`.
+  The pre-port tool fails the same way on the deployed image. This repository
+  carries a two-line workaround (`_restore_moved_class`) guarded so it vanishes
+  when upstream fixes it. Anything downstream of crown segmentation — ALI's IOS
+  half, the IOS modes of ASO/AREG/FlexReg — has been broken on the current image.
+- **Disk.** Each torch venv is 7.2–7.7 GB at cu128. Deduplication across them is
+  not automatic and depends on `UV_CACHE_DIR` sitting on the same filesystem as
+  the venvs; see the repository README.
