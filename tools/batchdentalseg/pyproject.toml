@@ -1,0 +1,43 @@
+[project]
+name = "sadt-batchdentalseg"
+version = "0.1.0"
+description = "Segment teeth and jaw structures on a dental CT or CBCT scan."
+# The deployment image's interpreter (lab-ai:2026.08, python 3.11.13), which is
+# where every BatchDentalSeg result to date was produced.
+requires-python = ">=3.11,<3.12"
+# Same stack as AMASSS and for the same reason: pinned to what the deployed
+# server runs, not to upstream's declared versions. See README. No vtk here --
+# the mesh exports are deliberately not ported.
+dependencies = [
+    "torch==2.8.0",
+    "nnunetv2==2.8.1",
+    "SimpleITK==2.5.6",
+    "numpy==2.3.2",
+]
+
+[dependency-groups]
+dev = ["pytest==8.3.4"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_batchdentalseg"]
+
+# `explicit` is load-bearing: without it uv looks for EVERY package on the
+# PyTorch index, and most of them are not there.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+    "models: needs a real model bundle and is skipped without one. See tests/data/README.md.",
+]

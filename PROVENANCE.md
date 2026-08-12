@@ -18,7 +18,7 @@ information in full, including the pins kept and the changes made.
 | [aso](tools/aso/) | — | — | not migrated yet | — |
 | [ali](tools/ali/) | — | — | not migrated yet | — |
 | [crownseg](tools/crownseg/) | — | — | not migrated yet | — |
-| [batchdentalseg](tools/batchdentalseg/) | — | — | not migrated yet | — |
+| [batchdentalseg](tools/batchdentalseg/) | `BATCHDENTALSEG/BATCHDENTALSEGLib/SegmentationWidget.py` | `6df3fab` (2026-08-05) | 2026-08-12 | no — repackaging only. Same stack as amasss (torch 2.8.0+cu128, nnunetv2 2.8.1); labels compared against the pre-port implementation. |
 
 A row is filled in by the PR that migrates the tool, in the same commit that
 adds the package. "Algorithm modified" is `no` for a pure repackaging and

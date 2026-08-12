@@ -13,23 +13,15 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from base import ToolArgumentError
-from tools.BatchDentalSeg.BatchDentalSeg import BatchDentalSegTool
-from tools.BatchDentalSeg.src import BatchDentalSegLogic, catalogs, nnunet_runner
+from pathlib import Path
+
+from sadt_batchdentalseg import run
+from sadt_batchdentalseg import catalogs, nnunet_runner, pipeline
+from sadt_batchdentalseg.errors import ToolInputError
 
 
-@pytest.fixture(autouse=True)
-def _temp_dir(tmp_path, monkeypatch):
-    """Point TEMP_DIR at the test's own directory.
-
-    `file_utils.make_scratch_dir` registers what it hands out with the request
-    being served and main.py is what deletes it, so a test calling the logic
-    directly has no request and nothing cleans up -- without this the suite
-    leaves one scratch directory per call in the server's real TEMP_DIR.
-    """
-    from config import settings
-
-    monkeypatch.setattr(settings, "TEMP_DIR", str(tmp_path / "server_tmp"))
+def segmentation_files(report):
+    return [path for scan in report["scans"] for path in scan.get("segmentations", [])]
 
 
 def _write_scan(path: str, size=(8, 8, 8), value: int = 40) -> str:
@@ -57,7 +49,7 @@ def _model_bundle(root: str, folder: str) -> str:
 def _stub_prediction(labels_present):
     """Stand in for nnUNet: write one label volume per input case."""
 
-    def predict_folder(model_folder, input_dir, output_dir, device):
+    def predict_folder(model_folder, input_dir, output_dir, device, **kwargs):
         os.makedirs(output_dir, exist_ok=True)
         for name in sorted(os.listdir(input_dir)):
             if not name.endswith("_0000.nii.gz"):
@@ -79,7 +71,6 @@ def _stub_prediction(labels_present):
 def stub_nnunet(monkeypatch):
     def _install(labels_present=(1, 2, 3)):
         monkeypatch.setattr(nnunet_runner, "predict_folder", _stub_prediction(labels_present))
-        monkeypatch.setattr(nnunet_runner, "check_dependencies", lambda: None)
         monkeypatch.setattr(nnunet_runner, "resolve_device", lambda requested=None: "cpu")
 
     return _install
@@ -89,27 +80,13 @@ def stub_nnunet(monkeypatch):
 # Catalog
 # ---------------------------------------------------------------------------
 
-def test_the_catalog_is_keyed_by_the_folder_the_manifest_downloads():
-    """The bundle's directory name IS the model: data-manifest.yml writes each
-    one into a folder of that name, and the client picks that name from
-    GET /tools/BatchDentalSeg/data. A key that drifts from the manifest makes
-    an installed model unselectable.
-
-    Skipped rather than failed when scripts/ is out of reach: the test
-    container mounts server/ only, and that is not a reason to fail a push.
-    """
-    manifest = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "scripts", "data-manifest.yml")
-    )
-    if not os.path.isfile(manifest):
-        pytest.skip("scripts/data-manifest.yml is not mounted in this environment")
-
-    with open(manifest, encoding="utf-8") as handle:
-        text = handle.read()
-    block = text[text.index("  BatchDentalSeg:"):]
-    block = block[: block.index("\n\n  #")]
-    for name in catalogs.MODEL_NAMES:
-        assert f"{name}/" in block or f"dest: {name}" in block, name
+# NOTE: the server-side suite also asserted every catalog key appears in
+# `scripts/data-manifest.yml`, because a key that drifts from the manifest makes
+# an installed model unselectable. That file lives in the server repository and
+# a tool package cannot reach it, so the check is gone and the contract is now
+# cross-repo: a catalog key here MUST equal the folder the manifest downloads
+# that bundle into. Documented in README.md; nothing in this repository can
+# enforce it.
 
 
 def test_label_values_are_unique_within_a_model():
@@ -161,23 +138,23 @@ def test_a_bundle_missing_its_checkpoint_is_not_accepted(tmp_path):
 def test_an_unusable_bundle_is_an_argument_error_naming_the_setup_command(tmp_path):
     """422, not 500: the request is fine, the deployment's data is not."""
     os.makedirs(str(tmp_path / "models" / "DentalSegmentator"), exist_ok=True)
-    with pytest.raises(ToolArgumentError, match="setup-models.sh"):
-        BatchDentalSegLogic.resolve_model(str(tmp_path / "models" / "DentalSegmentator"))
+    with pytest.raises(ToolInputError, match="setup-models.sh"):
+        pipeline.resolve_model(str(tmp_path / "models" / "DentalSegmentator"))
 
 
 def test_a_bundle_whose_name_is_not_a_known_model_is_refused(tmp_path):
     """The label table comes from the bundle's name, so an unrecognised one
     must stop the run: guessing a table would name every structure wrong."""
     _model_bundle(str(tmp_path / "models"), "SomeOtherBundle")
-    with pytest.raises(ToolArgumentError, match="not a BatchDentalSeg model"):
-        BatchDentalSegLogic.resolve_model(str(tmp_path / "models" / "SomeOtherBundle"))
+    with pytest.raises(ToolInputError, match="not a BatchDentalSeg model"):
+        pipeline.resolve_model(str(tmp_path / "models" / "SomeOtherBundle"))
 
 
 def test_the_bundle_name_selects_the_label_table(tmp_path):
     """Picking the NasoMaxilla bundle must bring NasoMaxilla's six labels, not
     the five-label table -- they disagree from value 3 onwards."""
     _model_bundle(str(tmp_path / "models"), "NasoMaxillaDentSeg")
-    model, _folder = BatchDentalSegLogic.resolve_model(
+    model, _folder = pipeline.resolve_model(
         str(tmp_path / "models" / "NasoMaxillaDentSeg")
     )
     assert model.name == "NasoMaxillaDentSeg"
@@ -191,7 +168,7 @@ def test_the_bundle_name_selects_the_label_table(tmp_path):
 def test_discovery_is_recursive(tmp_path):
     _write_scan(str(tmp_path / "in" / "a" / "scan1.nii.gz"))
     _write_scan(str(tmp_path / "in" / "b" / "deep" / "scan2.nii.gz"))
-    found = BatchDentalSegLogic.discover_scans(str(tmp_path / "in"), "Seg", str(tmp_path / "s"))
+    found = pipeline.discover_scans(str(tmp_path / "in"), "Seg")
     assert len(found) == 2
 
 
@@ -200,7 +177,7 @@ def test_a_previous_run_is_not_re_ingested(tmp_path):
     run would segment the first run's output."""
     _write_scan(str(tmp_path / "in" / "scan.nii.gz"))
     _write_scan(str(tmp_path / "in" / "scan_Seg.nii.gz"))
-    found = BatchDentalSegLogic.discover_scans(str(tmp_path / "in"), "Seg", str(tmp_path / "s"))
+    found = pipeline.discover_scans(str(tmp_path / "in"), "Seg")
     assert [os.path.basename(path) for path in found] == ["scan.nii.gz"]
 
 
@@ -211,8 +188,9 @@ def test_an_input_with_no_scan_is_an_argument_error(tmp_path, stub_nnunet):
         handle.write("nothing here")
     _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
 
-    with pytest.raises(ToolArgumentError, match="No scan found"):
-        BatchDentalSegLogic.segment(
+    with pytest.raises(ToolInputError, match="No scan found"):
+        pipeline.segment(
+        output_dir=str(tmp_path / "out"),
             input_path=str(tmp_path / "in"), model_path=str(tmp_path / "models" / "DentalSegmentator")
         )
 
@@ -227,14 +205,15 @@ def test_a_run_writes_one_segmentation_per_scan_and_a_report(tmp_path, stub_nnun
     _write_scan(str(tmp_path / "in" / "p2.nii.gz"))
     _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
 
-    run = BatchDentalSegLogic.segment(
+    report = pipeline.segment(
+        output_dir=str(tmp_path / "out"),
         input_path=str(tmp_path / "in"), model_path=str(tmp_path / "models" / "DentalSegmentator")
     )
 
-    produced = sorted(os.path.basename(path) for path in run.segmentation_files)
+    produced = sorted(os.path.basename(path) for path in segmentation_files(report))
     assert produced == ["p1_Seg.nii.gz", "p2_Seg.nii.gz"]
-    assert run.report["summary"] == "2/2 scan(s) segmented"
-    assert os.path.isfile(os.path.join(run.output_dir, "BatchDentalSeg_report.json"))
+    assert report["summary"] == "2/2 scan(s) segmented"
+    assert os.path.isfile(os.path.join(str(tmp_path / "out"), "BatchDentalSeg_report.json"))
 
 
 def test_the_report_carries_the_label_table(tmp_path, stub_nnunet):
@@ -244,12 +223,13 @@ def test_the_report_carries_the_label_table(tmp_path, stub_nnunet):
     _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
     _model_bundle(str(tmp_path / "models"), "NasoMaxillaDentSeg")
 
-    run = BatchDentalSegLogic.segment(
+    report = pipeline.segment(
+        output_dir=str(tmp_path / "out"),
         input_path=str(tmp_path / "in"),
         model_path=str(tmp_path / "models" / "NasoMaxillaDentSeg"),
     )
-    assert run.report["model"] == "NasoMaxillaDentSeg"
-    assert run.report["labels"]["Maxilla"] == 3
+    assert report["model"] == "NasoMaxillaDentSeg"
+    assert report["labels"]["Maxilla"] == 3
 
 
 def test_the_output_mirrors_the_input_tree(tmp_path, stub_nnunet):
@@ -260,11 +240,12 @@ def test_the_output_mirrors_the_input_tree(tmp_path, stub_nnunet):
     _write_scan(str(tmp_path / "in" / "subjectB" / "scan.nii.gz"))
     _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
 
-    run = BatchDentalSegLogic.segment(
+    report = pipeline.segment(
+        output_dir=str(tmp_path / "out"),
         input_path=str(tmp_path / "in"), model_path=str(tmp_path / "models" / "DentalSegmentator")
     )
 
-    relative = sorted(os.path.relpath(path, run.output_dir) for path in run.segmentation_files)
+    relative = sorted(os.path.relpath(path, str(tmp_path / "out")) for path in segmentation_files(report))
     assert relative == [
         os.path.join("subjectA", "scan_Seg.nii.gz"),
         os.path.join("subjectB", "scan_Seg.nii.gz"),
@@ -278,12 +259,13 @@ def test_the_segmentation_lands_on_the_input_scan_geometry(tmp_path, stub_nnunet
     scan = _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
     _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
 
-    run = BatchDentalSegLogic.segment(
+    report = pipeline.segment(
+        output_dir=str(tmp_path / "out"),
         input_path=str(tmp_path / "in"), model_path=str(tmp_path / "models" / "DentalSegmentator")
     )
 
     reference = sitk.ReadImage(scan)
-    produced = sitk.ReadImage(run.segmentation_files[0])
+    produced = sitk.ReadImage(segmentation_files(report)[0])
     assert produced.GetSize() == reference.GetSize()
     assert np.allclose(produced.GetOrigin(), reference.GetOrigin())
     assert np.allclose(produced.GetSpacing(), reference.GetSpacing())
@@ -296,13 +278,14 @@ def test_separate_segments_writes_only_the_labels_actually_present(tmp_path, stu
     _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
     _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
 
-    run = BatchDentalSegLogic.segment(
+    report = pipeline.segment(
+        output_dir=str(tmp_path / "out"),
         input_path=str(tmp_path / "in"),
         model_path=str(tmp_path / "models" / "DentalSegmentator"),
         separate_segments=True,
     )
 
-    names = sorted(os.path.basename(path) for path in run.segmentation_files)
+    names = sorted(os.path.basename(path) for path in segmentation_files(report))
     assert names == ["p1_Seg.nii.gz", "p1_Seg_Upper-Skull.nii.gz", "p1_Seg_Upper-Teeth.nii.gz"]
 
 
@@ -311,13 +294,14 @@ def test_a_separate_segment_holds_only_its_own_label(tmp_path, stub_nnunet):
     _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
     _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
 
-    run = BatchDentalSegLogic.segment(
+    report = pipeline.segment(
+        output_dir=str(tmp_path / "out"),
         input_path=str(tmp_path / "in"),
         model_path=str(tmp_path / "models" / "DentalSegmentator"),
         separate_segments=True,
     )
 
-    mandible = next(path for path in run.segmentation_files if path.endswith("Mandible.nii.gz"))
+    mandible = next(path for path in segmentation_files(report) if path.endswith("Mandible.nii.gz"))
     # GetArrayFromImage, not GetArrayViewFromImage: a VIEW borrows the image's
     # buffer, and reading it off a temporary the expression drops reads freed
     # memory -- which looks exactly like a corrupt mask.
@@ -342,14 +326,15 @@ def test_an_unreadable_scan_does_not_lose_the_others(tmp_path, stub_nnunet, monk
         handle.write(b"not a volume")
     _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
 
-    run = BatchDentalSegLogic.segment(
+    report = pipeline.segment(
+        output_dir=str(tmp_path / "out"),
         input_path=str(tmp_path / "in"), model_path=str(tmp_path / "models" / "DentalSegmentator")
     )
 
-    statuses = {entry["input"]: entry["status"] for entry in run.report["scans"]}
+    statuses = {entry["input"]: entry["status"] for entry in report["scans"]}
     assert statuses == {"p1.nii.gz": "ok", "p2.nii.gz": "failed"}
-    assert run.report["summary"] == "1/2 scan(s) segmented"
-    assert len(run.segmentation_files) == 1
+    assert report["summary"] == "1/2 scan(s) segmented"
+    assert len(segmentation_files(report)) == 1
 
 
 def test_a_batch_of_only_unreadable_scans_is_an_argument_error(tmp_path, stub_nnunet):
@@ -361,28 +346,11 @@ def test_a_batch_of_only_unreadable_scans_is_an_argument_error(tmp_path, stub_nn
         handle.write(b"not a volume")
     _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
 
-    with pytest.raises(ToolArgumentError, match="could be read"):
-        BatchDentalSegLogic.segment(
+    with pytest.raises(ToolInputError, match="could be read"):
+        pipeline.segment(
+        output_dir=str(tmp_path / "out"),
             input_path=str(tmp_path / "in"), model_path=str(tmp_path / "models" / "DentalSegmentator")
         )
-
-
-def test_a_zip_input_is_unpacked(tmp_path, stub_nnunet):
-    """A batch reaches run() as an archive, because the schema declares the
-    volume type first so the client's file picker stays a file picker."""
-    import zipfile
-
-    stub_nnunet()
-    _write_scan(str(tmp_path / "src" / "p1.nii.gz"))
-    archive = str(tmp_path / "batch.zip")
-    with zipfile.ZipFile(archive, "w") as zf:
-        zf.write(str(tmp_path / "src" / "p1.nii.gz"), "cohort/p1.nii.gz")
-    _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
-
-    run = BatchDentalSegLogic.segment(
-        input_path=archive, model_path=str(tmp_path / "models" / "DentalSegmentator")
-    )
-    assert len(run.segmentation_files) == 1
 
 
 def test_nnunet_case_ids_are_positional_not_patient_names(tmp_path, stub_nnunet, monkeypatch):
@@ -390,51 +358,125 @@ def test_nnunet_case_ids_are_positional_not_patient_names(tmp_path, stub_nnunet,
     from the file name would make two `scan.nii.gz` overwrite each other."""
     seen = {}
 
-    def capture(model_folder, input_dir, output_dir, device):
+    def capture(model_folder, input_dir, output_dir, device, **kwargs):
         seen["inputs"] = sorted(os.listdir(input_dir))
         _stub_prediction((1,))(model_folder, input_dir, output_dir, device)
 
     monkeypatch.setattr(nnunet_runner, "predict_folder", capture)
-    monkeypatch.setattr(nnunet_runner, "check_dependencies", lambda: None)
     monkeypatch.setattr(nnunet_runner, "resolve_device", lambda requested=None: "cpu")
 
     _write_scan(str(tmp_path / "in" / "a" / "scan.nii.gz"))
     _write_scan(str(tmp_path / "in" / "b" / "scan.nii.gz"))
     _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
 
-    BatchDentalSegLogic.segment(
+    pipeline.segment(
+        output_dir=str(tmp_path / "out"),
         input_path=str(tmp_path / "in"), model_path=str(tmp_path / "models" / "DentalSegmentator")
     )
     assert seen["inputs"] == ["case_0000_0000.nii.gz", "case_0001_0000.nii.gz"]
 
 
 # ---------------------------------------------------------------------------
-# Schema
+# run()
 # ---------------------------------------------------------------------------
 
-def test_schema_is_valid():
-    BatchDentalSegTool().check_schema()
+def test_run_returns_the_output_directory_it_was_given(tmp_path, stub_nnunet):
+    stub_nnunet()
+    _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
+    _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
+
+    output = run(
+        scans=tmp_path / "in",
+        model=tmp_path / "models" / "DentalSegmentator",
+        output_dir=tmp_path / "out",
+    )
+
+    assert output == tmp_path / "out"
+    assert (output / "BatchDentalSeg_report.json").is_file()
+    assert (output / "p1_Seg.nii.gz").is_file()
 
 
-def test_input_alone_is_not_a_complete_request():
-    """`model` names the hosted bundle and is required: without it there is
-    nothing to run."""
-    tool = BatchDentalSegTool()
-    with pytest.raises(ToolArgumentError, match="model"):
-        tool.validate({"input": "/tmp/scan.nii.gz"})
+def test_run_writes_nothing_outside_the_output_directory(tmp_path, stub_nnunet):
+    stub_nnunet()
+    _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
+    _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
+    before = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+    run(scans=tmp_path / "in", model=tmp_path / "models" / "DentalSegmentator",
+        output_dir=tmp_path / "out")
+
+    after = sorted(
+        path
+        for path in tmp_path.rglob("*")
+        if path.is_file() and not path.is_relative_to(tmp_path / "out")
+    )
+    assert after == before
 
 
-def test_the_model_is_a_name_not_an_upload():
-    """`model` is a scalar `server_selectable`, so the weights are selected by
-    name and never travel: main.py refuses an upload for it with a 400."""
-    spec = BatchDentalSegTool().arguments["model"]
-    assert spec.server_selectable == "model"
-    assert not spec.is_file
+def test_the_bulky_intermediates_do_not_survive_the_run(tmp_path, stub_nnunet):
+    """One converted volume and one predicted volume per scan, inside what
+    gets shipped back."""
+    stub_nnunet()
+    _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
+    _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
+
+    output = run(scans=tmp_path / "in", model=tmp_path / "models" / "DentalSegmentator",
+                 output_dir=tmp_path / "out")
+
+    assert not (output / pipeline.WORK_DIRNAME).exists()
+    assert sorted(p.name for p in output.iterdir()) == [
+        "BatchDentalSeg_report.json",
+        "p1_Seg.nii.gz",
+    ]
 
 
-def test_unexpected_arguments_are_refused():
-    tool = BatchDentalSegTool()
-    with pytest.raises(ToolArgumentError, match="Unexpected argument"):
-        tool.validate(
-            {"input": "/tmp/scan.nii.gz", "model": "bundle", "dental_model": "NotAModel"}
-        )
+def test_run_accepts_a_single_scan_as_readily_as_a_folder(tmp_path, stub_nnunet):
+    stub_nnunet()
+    scan = _write_scan(str(tmp_path / "in" / "p1.nii.gz"))
+    _model_bundle(str(tmp_path / "models"), "DentalSegmentator")
+
+    output = run(scans=Path(scan), model=tmp_path / "models" / "DentalSegmentator",
+                 output_dir=tmp_path / "out")
+
+    assert (output / "p1_Seg.nii.gz").is_file()
+
+
+# ---------------------------------------------------------------------------
+# the real models
+# ---------------------------------------------------------------------------
+
+REAL_MODEL = os.environ.get("SADT_BATCHDENTALSEG_MODEL")
+REAL_SCAN = os.environ.get("SADT_BATCHDENTALSEG_SCAN")
+
+
+@pytest.mark.gpu
+@pytest.mark.models
+@pytest.mark.skipif(
+    not (REAL_MODEL and REAL_SCAN),
+    reason="set SADT_BATCHDENTALSEG_MODEL and SADT_BATCHDENTALSEG_SCAN (see tests/data/README.md)",
+)
+def test_real_model_segments_a_real_scan(tmp_path):
+    """A real bundle on a real CBCT, on the GPU.
+
+    Labels are compared against the pre-port implementation separately (see
+    README, "Validated against"); what this asserts is that a real checkpoint,
+    real scan geometry and the label table survive the repackaging.
+    """
+    output = run(
+        scans=Path(REAL_SCAN),
+        model=Path(REAL_MODEL),
+        output_dir=tmp_path / "out",
+        separate_segments=True,
+    )
+
+    with open(output / "BatchDentalSeg_report.json") as handle:
+        report = json.load(handle)
+
+    assert report["model"] == os.path.basename(REAL_MODEL)
+    assert report["summary"] == "1/1 scan(s) segmented"
+    assert report["device"].startswith("cuda")
+
+    labels = next(output.rglob("*_Seg.nii.gz"))
+    values = set(np.unique(sitk.GetArrayFromImage(sitk.ReadImage(str(labels)))).tolist())
+    assert values - {0}, "the network emitted at least one structure"
+    assert values <= {0} | set(report["labels"].values()), "no label outside the table"
