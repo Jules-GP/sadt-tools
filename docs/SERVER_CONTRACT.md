@@ -5,9 +5,65 @@ Written for whoever works on
 It is the other half of the split: this repository holds tools that know nothing
 about the server, so everything they stopped doing, the server now does.
 
-Read it as a checklist. The items under "Work that moved to the server" are the
-ones that will bite, because in each case something used to happen and now
-nothing does.
+## Status: checked against the server, 2026-08-12
+
+Everything below was verified by **running it**, against
+`slicer-remote-tool-server` at `5c22e46` ("FIX : align the server with the
+contract sadt-tools actually emits"). The server has been aligned in parallel
+and already implements the contract. What was confirmed working:
+
+| | Evidence |
+|---|---|
+| The runner runs a packaged tool in its own venv | `server/runner.py` ran `_template` and `surgmovpred` (real 112-model bundle) from `tools/`, writing `result.json` |
+| `dict[str, Path]` survives | surgmovpred came back as `{"excel": …, "csv": …}` |
+| Errors map by class name | a bad `metrics` gave `{"error": {"type": "ToolInputError", "message": "Unknown metric(s): median…"}}` |
+| The runner owns logging | surgmovpred's records appeared, formatted by the runner |
+| Schemas come from `describe.py` | `server/schema_tool.py:158` invokes it with the tool's interpreter |
+| `choices` is understood | `schema_tool.py:319` maps it back onto choice / multichoice widgets |
+| `source_hash` is the cache key | `schema_tool.py:190`, cached outside the read-only tool folder |
+| `output_dir` is stripped from what clients see | `amasss` publishes 11 of its 12 arguments |
+| Archives are unpacked, with the bomb cap and `strip_single_root` | `server/main.py:214` |
+| GPU work is capped **across** tools | `server/config.py:76` |
+| The registry loads them | 4 of 5 (`_template` correctly excluded), alongside the old in-process ones |
+
+**One thing is missing: `server/deployment.toml` does not exist.** The mechanism
+that needs it is built — `ToolDeployment.data_dir` in `server/deployment.py`
+exists precisely for the case below — but with no file, `data_slug()` falls back
+to the tool's own name and `server_selectable` is empty for every tool. Measured
+consequence:
+
+```
+list_models("amasss")  -> []                    # the tool's name
+list_models("AMASSS")  -> ['AMASSS_Models']     # where the data actually is
+```
+
+So a migrated tool finds no weights, and its `model` argument is published as a
+plain path with no server-side listing — the client can neither pick a bundle
+nor upload one, since weights do not travel. Sixteen lines fix it, verified:
+
+```toml
+[tools.amasss]
+data_dir = "AMASSS"
+server_selectable = { model = "model", scans = "testfile" }
+
+[tools.batchdentalseg]
+data_dir = "BatchDentalSeg"
+server_selectable = { model = "model", scans = "testfile" }
+
+[tools.crownseg]
+data_dir = "CrownSeg"
+server_selectable = { model = "model", meshes = "testfile" }
+
+[tools.surgmovpred]
+data_dir = "SurgMovPred"
+server_selectable = { model = "model", measurements = "testfile" }
+```
+
+With it, all four resolve: `AMASSS_Models`, `PediatricDentalSeg`, `all_models`,
+`07-21-22_val-loss0.169.pth`.
+
+The rest of this document is the contract itself, kept as the reference the two
+repositories are written against.
 
 ## 1. Discovery
 
@@ -67,13 +123,13 @@ Three things to build against:
 directly — no `sys.path` juggling needed, though adding `/tools/<name>/src`
 first is harmless and makes the runner work against an unsynced checkout too.
 
-**There is a working reference implementation of the runner in this repository**:
-[`testkit/src/sadt_testkit/_driver.py`](../testkit/src/sadt_testkit/_driver.py).
-It is ~60 lines, stdlib-only, and does exactly this job — import the package,
-coerce a JSON object into the arguments `run()` declares, call it, hand the paths
-back. It is what every tool's integration tests already run against, so if the
-server's runner behaves differently from it, the tests here pass while
-production fails. Copy it or keep the two in step deliberately.
+`server/runner.py` implements this, and
+[`testkit/src/sadt_testkit/_driver.py`](../testkit/src/sadt_testkit/_driver.py)
+in this repository is the same contract, ~60 lines, stdlib-only. The two were
+written independently and agree — same coercion by annotation, same result
+file, same error-class-name convention. **Keep them in step deliberately**: the
+driver is what every tool's integration tests run against, so if they drift, the
+tests here pass while production fails.
 
 Two details from it worth carrying over:
 
@@ -92,7 +148,9 @@ others return a `path` — the output directory they were given.
 ## 3. Work that moved to the server
 
 Each of these used to happen inside a tool and now happens nowhere unless the
-server does it.
+server does it. **All of them are already implemented** — the file references
+are in the status table above. They are kept here because they are the reasoning
+behind the code, and the first person to touch that code will want it.
 
 ### Unpacking archives
 
@@ -107,7 +165,7 @@ passes a real file or directory. Two behaviours have to come with it:
 
 ### Capping GPU work
 
-**This is the one most likely to bite.** Every tool used to hold a
+**Implemented** (`config.py:76`, `MAX_GPU_JOBS`, across tools). Every tool used to hold a
 `threading.BoundedSemaphore` — `AMASSS_MAX_GPU_JOBS`, `BATCHDENTALSEG_MAX_GPU_JOBS`,
 `CROWNSEG_MAX_GPU_JOBS`, `ALI_MAX_GPU_JOBS`, all defaulting to 1 — because every
 tool shared one server process. A tool is now its own process, so an in-process
@@ -146,7 +204,8 @@ its `catalogs.MODELS` (`DentalSegmentator`, `PediatricDentalSeg`,
 `scripts/data-manifest.yml` downloads that bundle into. The server-side test that
 enforced that has no home any more — this repository cannot read the manifest.
 
-Also note the **slug case change**: tool directories here are lowercase
+**This is the one that needs a `deployment.toml`** — see the status section.
+Tool directories here are lowercase
 (`amasss`, `batchdentalseg`, `crownseg`, `surgmovpred`) and that is what the
 schema's `name` is, while `DATA/` still uses `AMASSS/`, `BatchDentalSeg/`,
 `CrownSeg/`, `SurgMovPred/`. Map or rename; do not assume they match.
