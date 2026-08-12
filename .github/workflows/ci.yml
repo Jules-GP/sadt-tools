@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The matrix is read off the filesystem rather than written down here, so
+  # adding a tool never means editing this file. A directory joins the matrix
+  # the moment it has a pyproject.toml.
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      tools: ${{ steps.list.outputs.tools }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: |
+          tools=$(find tools -mindepth 2 -maxdepth 2 -name pyproject.toml -printf '%h\n' \
+            | xargs -r -n1 basename | sort | jq -R . | jq -sc .)
+          echo "tools=$tools" >> "$GITHUB_OUTPUT"
+          echo "matrix: $tools"
+
+  tool:
+    needs: discover
+    if: needs.discover.outputs.tools != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      # One tool's broken lockfile says nothing about the others, and finding
+      # out about all of them in one run beats six round trips.
+      fail-fast: false
+      matrix:
+        tool: ${{ fromJson(needs.discover.outputs.tools) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # --frozen, not a plain sync: this fails when uv.lock no longer matches
+      # pyproject.toml, which is the whole point of committing the lock.
+      - name: Sync from the committed lockfile
+        working-directory: tools/${{ matrix.tool }}
+        run: uv sync --frozen
+
+      # Runs with the TOOL's interpreter, not the runner's: importing a tool
+      # needs the tool's dependencies. It fails on an unsupported annotation,
+      # so a schema the client cannot render never reaches main.
+      - name: Import and schema
+        run: tools/${{ matrix.tool }}/.venv/bin/python scripts/describe.py tools/${{ matrix.tool }}
+
+      # GPU tests are excluded here because the runner has no CUDA device. They
+      # are not optional: run them by hand and state the result in the PR.
+      - name: Tests
+        working-directory: tools/${{ matrix.tool }}
+        run: uv run --frozen pytest -m "not gpu"
+
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # --no-project: scripts/ is deliberately not a package. There is no
+      # repository-level environment for a tool venv to be confused with.
+      - name: Tests
+        run: uv run --no-project --python 3.12 --with pytest -- pytest scripts/tests -q
+      - name: Audit
+        run: uv run scripts/audit.py
