@@ -17,6 +17,8 @@ METRICS = {
     "std": lambda np, values: float(np.std(values)),
 }
 
+REDUCTIONS = ("per_scan", "pooled")
+
 
 class ToolInputError(ValueError):
     """An input the tool cannot work with, phrased for whoever sent it.
@@ -47,12 +49,16 @@ def iter_scans(scans: Path) -> list[Path]:
 def summarise(
     scans: Path,
     output_dir: Path,
-    metrics: list[str],
+    metrics: list,
+    reduction: str,
     threshold: float,
     per_scan_report: bool,
 ) -> Path:
     import numpy as np
 
+    # `Literal` is published as `choices` so a client can render a picker, but
+    # the runner still calls run(**params) from a JSON object -- a direct caller
+    # or a stale client can send anything. Checked here, not assumed.
     unknown = [name for name in metrics if name not in METRICS]
     if unknown:
         raise ToolInputError(
@@ -60,12 +66,17 @@ def summarise(
         )
     if not metrics:
         raise ToolInputError("Select at least one metric.")
+    if reduction not in REDUCTIONS:
+        raise ToolInputError(
+            f"Unknown reduction '{reduction}'. Available: {', '.join(REDUCTIONS)}."
+        )
 
     # Created here, not by the caller: a tool that assumes its output directory
     # already exists fails the first time it is run outside the server.
     output_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    pooled = []
     for scan in iter_scans(scans):
         values = np.load(scan).ravel()
         kept = values[values > threshold]
@@ -77,8 +88,17 @@ def summarise(
         )
         rows.append(row)
 
+        if reduction == "pooled":
+            pooled.append(kept)
+
         if per_scan_report:
             (output_dir / f"{scan.stem}.txt").write_text(_format(row), encoding="utf-8")
+
+    if reduction == "pooled":
+        values = np.concatenate(pooled) if pooled else np.empty(0)
+        row = {"scan": "all", "voxels": int(values.size)}
+        row.update({name: METRICS[name](np, values) for name in metrics} if values.size else {})
+        rows = [row]
 
     summary = output_dir / "summary.txt"
     summary.write_text("\n".join(_format(row) for row in rows) + "\n", encoding="utf-8")
