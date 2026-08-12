@@ -1,33 +1,28 @@
-"""Unit tests for the AMASSS tool logic.
+"""End-to-end tests for AMASSS.
 
-No GPU and no real nnUNet models are needed: `nnunet_runner.predict_folder`
-is monkeypatched with a stub that writes synthetic masks, so everything
-around the inference itself -- input discovery, output filtering, model
-resolution, format conversion, label merging, file naming, the report -- is
-exercised for real.
+No GPU and no real nnUNet models are needed for most of it:
+`nnunet_runner.predict_folder` is monkeypatched with a stub that writes
+synthetic masks, so everything around the inference itself -- input discovery,
+output filtering, model resolution, format conversion, label merging, file
+naming, the report -- is exercised for real.
 
-Run just this module:
-    cd server && ./venv/bin/pytest tools/AMASSS/test/
+`test_real_models_*` is marked `gpu` and `models`: it runs the shipped bundle on
+a real CBCT when `SADT_AMASSS_MODELS` and `SADT_AMASSS_SCAN` point at them, and
+is skipped otherwise. CI skips it; run it by hand before opening a PR.
 """
 
-import glob
-from functools import lru_cache
 import json
 import os
-import zipfile
-
-# Set before anything imports config.Settings() (file_utils does, via the
-# tool logic), so the suite runs regardless of the local environment.
-os.environ.setdefault("API_TOKEN", "test-token")
+from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from base import Selection, ToolArgumentError
-from config import settings
-from tools.AMASSS.AMASSS import AMASSSTool
-from tools.AMASSS.src import AMASSSLogic, nnunet_runner
+from sadt_amasss import run
+from sadt_amasss import catalog, nnunet_runner, pipeline, vtk_export
+from sadt_amasss.errors import ToolInputError
 
 
 # ---------------------------------------------------------------------------
@@ -52,11 +47,15 @@ def _make_model_bundle(root, codes):
     return str(root)
 
 
+def segmentation_files(report):
+    return [path for scan in report["scans"] for path in scan.get("segmentations", [])]
+
+
 @pytest.fixture
 def stub_predictor(monkeypatch):
     """Replace nnUNet inference with a deterministic synthetic mask writer."""
 
-    def fake_predict_folder(model_folder, input_dir, output_dir, device):
+    def fake_predict_folder(model_folder, input_dir, output_dir, device, **kwargs):
         os.makedirs(output_dir, exist_ok=True)
         for name in sorted(os.listdir(input_dir)):
             if not name.endswith("_0000.nii.gz"):
@@ -74,6 +73,83 @@ def stub_predictor(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# run()
+# ---------------------------------------------------------------------------
+
+def test_run_returns_the_output_directory_it_was_given(tmp_path, stub_predictor):
+    _write_scan(tmp_path / "input" / "patient01.nii.gz")
+    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND", "MAX"])
+
+    output = run(
+        scans=tmp_path / "input",
+        model=Path(bundle),
+        output_dir=tmp_path / "out",
+        structures=["MAND", "MAX"],
+        merge=["MERGED"],
+    )
+
+    assert output == tmp_path / "out"
+    assert (output / "AMASSS_report.json").is_file()
+    assert (output / "patient01_Pred_SegOut" / "patient01_Pred_MERGED.nii.gz").is_file()
+    with open(output / "AMASSS_report.json") as handle:
+        assert json.load(handle)["summary"]["processed"] == 1
+
+
+def test_run_writes_nothing_outside_the_output_directory(tmp_path, stub_predictor):
+    _write_scan(tmp_path / "input" / "patient01.nii.gz")
+    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
+    before = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+    run(scans=tmp_path / "input", model=Path(bundle), output_dir=tmp_path / "out")
+
+    after = sorted(
+        path
+        for path in tmp_path.rglob("*")
+        if path.is_file() and not path.is_relative_to(tmp_path / "out")
+    )
+    assert after == before
+
+
+def test_the_bulky_intermediates_do_not_survive_the_run(tmp_path, stub_predictor):
+    """One predicted volume per scan and per structure, inside what gets shipped."""
+    _write_scan(tmp_path / "input" / "patient01.nii.gz")
+    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND", "MAX"])
+
+    output = run(scans=tmp_path / "input", model=Path(bundle), output_dir=tmp_path / "out")
+
+    assert not (output / pipeline.WORK_DIRNAME).exists()
+    assert sorted(p.name for p in output.iterdir()) == [
+        "AMASSS_report.json",
+        "patient01_Pred_SegOut",
+    ]
+
+
+def test_run_accepts_a_single_scan_as_readily_as_a_folder(tmp_path, stub_predictor):
+    scan = _write_scan(tmp_path / "input" / "patient01.nii.gz")
+    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
+
+    output = run(scans=Path(scan), model=Path(bundle), output_dir=tmp_path / "out")
+
+    assert (output / "patient01_Pred_SegOut" / "patient01_Pred_MAND.nii.gz").is_file()
+
+
+def test_run_accepts_the_old_display_names(tmp_path, stub_predictor):
+    """A client still sending 'Mandible' rather than MAND keeps working."""
+    _write_scan(tmp_path / "input" / "patient01.nii.gz")
+    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
+
+    output = run(
+        scans=tmp_path / "input",
+        model=Path(bundle),
+        output_dir=tmp_path / "out",
+        structures=["Mandible"],
+        merge=["Separated segmentation files"],
+    )
+
+    assert (output / "patient01_Pred_SegOut" / "patient01_Pred_MAND.nii.gz").is_file()
+
+
+# ---------------------------------------------------------------------------
 # split_scan_extension / is_previous_output
 # ---------------------------------------------------------------------------
 
@@ -88,7 +164,7 @@ def stub_predictor(monkeypatch):
     ],
 )
 def test_split_scan_extension(filename, expected):
-    assert AMASSSLogic.split_scan_extension(filename) == expected
+    assert pipeline.split_scan_extension(filename) == expected
 
 
 @pytest.mark.parametrize(
@@ -104,7 +180,7 @@ def test_split_scan_extension(filename, expected):
     ],
 )
 def test_is_previous_output(filename, expected):
-    assert AMASSSLogic.is_previous_output(filename, "Pred") is expected
+    assert pipeline.is_previous_output(filename, "Pred") is expected
 
 
 def test_discover_scans_excludes_previous_outputs(tmp_path):
@@ -113,7 +189,7 @@ def test_discover_scans_excludes_previous_outputs(tmp_path):
     _write_scan(tmp_path / "input" / "patient01_Pred_MAND.nii.gz")
     _write_scan(tmp_path / "input" / "patient01_Pred_MERGED.nii.gz")
 
-    scans = AMASSSLogic.discover_scans(str(tmp_path / "input"), "Pred", str(tmp_path / "scratch"))
+    scans = pipeline.discover_scans(str(tmp_path / "input"), "Pred")
 
     assert [os.path.basename(path) for path in scans] == ["patient01.nii.gz"]
 
@@ -123,27 +199,16 @@ def test_discover_scans_is_recursive(tmp_path):
     _write_scan(tmp_path / "input" / "a.nii.gz")
     _write_scan(tmp_path / "input" / "nested" / "deeper" / "b.nii.gz")
 
-    scans = AMASSSLogic.discover_scans(str(tmp_path / "input"), "Pred", str(tmp_path / "scratch"))
+    scans = pipeline.discover_scans(str(tmp_path / "input"), "Pred")
 
     assert sorted(os.path.basename(path) for path in scans) == ["a.nii.gz", "b.nii.gz"]
 
 
-def test_discover_scans_accepts_zip(tmp_path):
-    scan = _write_scan(tmp_path / "src" / "patient01.nii.gz")
-    zip_path = tmp_path / "input.zip"
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.write(scan, "patient01.nii.gz")
-
-    scans = AMASSSLogic.discover_scans(str(zip_path), "Pred", str(tmp_path / "scratch"))
-
-    assert [os.path.basename(path) for path in scans] == ["patient01.nii.gz"]
-
-
 def test_discover_scans_raises_instead_of_exiting(tmp_path):
-    """The original called sys.exit(1); a server needs a catchable exception."""
+    """The original called sys.exit(1), which no caller can act on."""
     (tmp_path / "empty").mkdir()
     with pytest.raises(FileNotFoundError):
-        AMASSSLogic.discover_scans(str(tmp_path / "empty"), "Pred", str(tmp_path / "scratch"))
+        pipeline.discover_scans(str(tmp_path / "empty"), "Pred")
 
 
 # ---------------------------------------------------------------------------
@@ -153,9 +218,7 @@ def test_discover_scans_raises_instead_of_exiting(tmp_path):
 def test_resolve_models_reports_missing_structures(tmp_path):
     bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
 
-    available, missing = AMASSSLogic.resolve_models(
-        bundle, ("MAND", "MAX"), str(tmp_path / "scratch")
-    )
+    available, missing = pipeline.resolve_models(bundle, ("MAND", "MAX"))
 
     assert list(available) == ["MAND"]
     assert missing == ["MAX"]
@@ -167,9 +230,7 @@ def test_resolve_models_ignores_model_without_checkpoint(tmp_path):
     plans.mkdir(parents=True)
     _make_model_bundle(tmp_path / "bundle", ["MAX"])
 
-    available, missing = AMASSSLogic.resolve_models(
-        str(tmp_path / "bundle"), ("MAND", "MAX"), str(tmp_path / "scratch")
-    )
+    available, missing = pipeline.resolve_models(str(tmp_path / "bundle"), ("MAND", "MAX"))
 
     assert list(available) == ["MAX"]
     assert missing == ["MAND"]
@@ -178,16 +239,14 @@ def test_resolve_models_ignores_model_without_checkpoint(tmp_path):
 def test_resolve_models_raises_when_nothing_found(tmp_path):
     (tmp_path / "bundle").mkdir()
     with pytest.raises(nnunet_runner.ModelNotFoundError):
-        AMASSSLogic.resolve_models(str(tmp_path / "bundle"), ("MAND",), str(tmp_path / "scratch"))
+        pipeline.resolve_models(str(tmp_path / "bundle"), ("MAND",))
 
 
 def test_resolve_models_descends_into_single_wrapper_folder(tmp_path):
-    """A zip of 'AMASSS_Models/' rather than of its contents still resolves."""
+    """A copy of 'AMASSS_Models/' rather than of its contents still resolves."""
     _make_model_bundle(tmp_path / "bundle" / "AMASSS_Models", ["MAND"])
 
-    available, _missing = AMASSSLogic.resolve_models(
-        str(tmp_path / "bundle"), ("MAND",), str(tmp_path / "scratch")
-    )
+    available, _missing = pipeline.resolve_models(str(tmp_path / "bundle"), ("MAND",))
 
     assert list(available) == ["MAND"]
 
@@ -201,7 +260,7 @@ def test_nrrd_input_is_really_converted(tmp_path):
     source = _write_scan(tmp_path / "scan.nrrd")
     destination = str(tmp_path / "p_000_0000.nii.gz")
 
-    AMASSSLogic._convert_to_nifti(source, destination)
+    pipeline._convert_to_nifti(source, destination)
 
     reread = sitk.ReadImage(destination)
     assert reread.GetSize() == (8, 8, 8)
@@ -209,6 +268,16 @@ def test_nrrd_input_is_really_converted(tmp_path):
     with open(destination, "rb") as handle:
         assert handle.read(2) == b"\x1f\x8b"  # gzip magic
     assert "NRRD" not in sitk.ReadImage(destination).GetMetaDataKeys()
+
+
+def test_converted_input_keeps_its_voxel_type(tmp_path):
+    """Casting to float32 doubled the bytes gzipped per scan and bought nothing."""
+    source = _write_scan(tmp_path / "scan.nrrd")
+    destination = str(tmp_path / "p_000_0000.nii.gz")
+
+    pipeline._convert_to_nifti(source, destination)
+
+    assert sitk.ReadImage(destination).GetPixelID() == sitk.ReadImage(source).GetPixelID()
 
 
 # ---------------------------------------------------------------------------
@@ -220,18 +289,17 @@ def test_segment_batch_merged_and_separate(tmp_path, stub_predictor):
     _write_scan(tmp_path / "input" / "patient02.nii.gz")
     bundle = _make_model_bundle(tmp_path / "bundle", ["MAND", "MAX"])
 
-    run = AMASSSLogic.segment(
+    report = pipeline.segment(
         input_path=str(tmp_path / "input"),
         model_path=bundle,
+        output_dir=str(tmp_path / "out"),
         structures=("MAND", "MAX"),
         merge=("MERGED", "SEPARATE"),
         prediction_ID="Pred",
-        scratch_dir=str(tmp_path / "scratch"),
     )
 
-    assert run.report["summary"] == {"total": 2, "processed": 2, "failed": 0}
-    names = sorted(os.path.basename(path) for path in run.segmentation_files)
-    assert names == [
+    assert report["summary"] == {"total": 2, "processed": 2, "failed": 0}
+    assert sorted(os.path.basename(p) for p in segmentation_files(report)) == [
         "patient01_Pred_MAND.nii.gz",
         "patient01_Pred_MAX.nii.gz",
         "patient01_Pred_MERGED.nii.gz",
@@ -239,33 +307,30 @@ def test_segment_batch_merged_and_separate(tmp_path, stub_predictor):
         "patient02_Pred_MAX.nii.gz",
         "patient02_Pred_MERGED.nii.gz",
     ]
-    assert os.path.isfile(os.path.join(run.output_dir, "AMASSS_report.json"))
 
 
 def test_an_uncompressed_input_still_produces_compressed_masks(tmp_path, stub_predictor):
     """Regression: the output extension used to mirror the input's, so a scan
     sent as a plain .nii produced one UNCOMPRESSED mask per structure -- 191 MB
-    each on a real CBCT, 1.75 GB for a nine-structure run, all of which the
-    client then had to download and unpack. Label volumes gzip ~100x."""
+    each on a real CBCT, 1.75 GB for a nine-structure run. Label volumes gzip ~100x."""
     _write_scan(tmp_path / "input" / "patient01.nii")
     bundle = _make_model_bundle(tmp_path / "bundle", ["MAND", "MAX"])
 
-    run = AMASSSLogic.segment(
+    report = pipeline.segment(
         input_path=str(tmp_path / "input"),
         model_path=bundle,
+        output_dir=str(tmp_path / "out"),
         structures=("MAND", "MAX"),
         merge=("MERGED", "SEPARATE"),
-        scratch_dir=str(tmp_path / "scratch"),
     )
 
-    produced = sorted(os.path.basename(path) for path in run.segmentation_files)
-    assert produced == [
+    assert sorted(os.path.basename(p) for p in segmentation_files(report)) == [
         "patient01_Pred_MAND.nii.gz",
         "patient01_Pred_MAX.nii.gz",
         "patient01_Pred_MERGED.nii.gz",
     ]
     # Written compressed, not merely named .gz.
-    for path in run.segmentation_files:
+    for path in segmentation_files(report):
         with open(path, "rb") as handle:
             assert handle.read(2) == b"\x1f\x8b", f"{path} is not gzip data"
 
@@ -277,15 +342,15 @@ def test_a_nrrd_input_keeps_its_format_and_is_compressed(tmp_path, stub_predicto
     _write_scan(tmp_path / "input" / "patient01.nrrd")
     bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
 
-    run = AMASSSLogic.segment(
+    report = pipeline.segment(
         input_path=str(tmp_path / "input"),
         model_path=bundle,
+        output_dir=str(tmp_path / "out"),
         structures=("MAND",),
         merge=("SEPARATE",),
-        scratch_dir=str(tmp_path / "scratch"),
     )
 
-    produced = run.segmentation_files[0]
+    produced = segmentation_files(report)[0]
     assert os.path.basename(produced) == "patient01_Pred_MAND.nrrd"
     # Still a readable NRRD carrying the right labels, not just a renamed file.
     assert set(np.unique(sitk.GetArrayFromImage(sitk.ReadImage(produced))).tolist()) <= {0, 1}
@@ -297,8 +362,8 @@ def test_every_scan_extension_maps_to_a_writable_output_extension(tmp_path):
     """compressed_extension must only ever name a spelling ITK can write --
     the ".nrrd.gz" mapping that shipped first could not be written at all."""
     image = sitk.GetImageFromArray(np.zeros((4, 4, 4), dtype=np.int16))
-    for extension in AMASSSLogic.SCAN_EXTENSIONS:
-        mapped = AMASSSLogic.compressed_extension(extension)
+    for extension in pipeline.SCAN_EXTENSIONS:
+        mapped = pipeline.compressed_extension(extension)
         # Writing is the real check: ITK accepts or refuses an extension, and
         # asserting against a hardcoded list would just restate the table.
         sitk.WriteImage(image, str(tmp_path / f"x{mapped}"), useCompression=True)
@@ -308,34 +373,36 @@ def test_merged_volume_uses_the_documented_labels(tmp_path, stub_predictor):
     _write_scan(tmp_path / "input" / "patient01.nii.gz")
     bundle = _make_model_bundle(tmp_path / "bundle", ["MAND", "CB"])
 
-    run = AMASSSLogic.segment(
+    report = pipeline.segment(
         input_path=str(tmp_path / "input"),
         model_path=bundle,
+        output_dir=str(tmp_path / "out"),
         structures=("MAND", "CB"),
         merge=("MERGED",),
-        scratch_dir=str(tmp_path / "scratch"),
     )
 
-    merged = next(p for p in run.segmentation_files if p.endswith("_MERGED.nii.gz"))
+    merged = next(p for p in segmentation_files(report) if p.endswith("_MERGED.nii.gz"))
     values = set(np.unique(sitk.GetArrayFromImage(sitk.ReadImage(merged))).tolist())
     # The stub gives both structures the same voxels, so MAND (painted last
     # per MERGING_ORDER) wins -- which is exactly the documented behavior.
-    assert values == {0, AMASSSLogic.LABELS["MAND"]}
+    assert values == {0, catalog.LABELS["MAND"]}
 
 
 def test_single_structure_is_written_separately_even_in_merged_mode(tmp_path, stub_predictor):
     _write_scan(tmp_path / "input" / "patient01.nii.gz")
     bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
 
-    run = AMASSSLogic.segment(
+    report = pipeline.segment(
         input_path=str(tmp_path / "input"),
         model_path=bundle,
+        output_dir=str(tmp_path / "out"),
         structures=("MAND",),
         merge=("MERGED",),
-        scratch_dir=str(tmp_path / "scratch"),
     )
 
-    assert [os.path.basename(p) for p in run.segmentation_files] == ["patient01_Pred_MAND.nii.gz"]
+    assert [os.path.basename(p) for p in segmentation_files(report)] == [
+        "patient01_Pred_MAND.nii.gz"
+    ]
 
 
 def test_report_lists_structures_without_a_model(tmp_path, stub_predictor):
@@ -343,175 +410,109 @@ def test_report_lists_structures_without_a_model(tmp_path, stub_predictor):
     _write_scan(tmp_path / "input" / "patient01.nii.gz")
     bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
 
-    run = AMASSSLogic.segment(
+    report = pipeline.segment(
         input_path=str(tmp_path / "input"),
         model_path=bundle,
+        output_dir=str(tmp_path / "out"),
         structures=("MAND", "MAX", "SKIN"),
-        scratch_dir=str(tmp_path / "scratch"),
     )
 
-    assert run.report["structures_without_model"] == ["MAX", "SKIN"]
-    assert run.report["predicted_structures"] == ["MAND"]
+    assert report["structures_without_model"] == ["MAX", "SKIN"]
+    assert report["predicted_structures"] == ["MAND"]
 
+
+def test_report_records_the_settings_that_move_the_masks(tmp_path, stub_predictor):
+    """GPU resampling and the step size both change the output, so a mask is
+    only reproducible next to the values that produced it."""
+    _write_scan(tmp_path / "input" / "patient01.nii.gz")
+    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
+
+    report = pipeline.segment(
+        input_path=str(tmp_path / "input"),
+        model_path=bundle,
+        output_dir=str(tmp_path / "out"),
+        structures=("MAND",),
+    )
+
+    # resolve_device is stubbed to "cpu", where the GPU path cannot apply.
+    assert report["gpu_resampling"] is False
+    assert report["tile_step_size"] == 0.5
+    # No surfaces requested -> nothing to report.
+    assert report["surface_decimation"] is None
+
+
+# ---------------------------------------------------------------------------
+# argument validation
+# ---------------------------------------------------------------------------
 
 def test_segment_rejects_unknown_structure(tmp_path):
     _write_scan(tmp_path / "input" / "patient01.nii.gz")
-    with pytest.raises(ValueError, match="Unknown structure"):
-        AMASSSLogic.segment(
+    with pytest.raises(ToolInputError, match="Unknown structure"):
+        pipeline.segment(
             input_path=str(tmp_path / "input"),
             model_path=str(tmp_path),
+            output_dir=str(tmp_path / "out"),
             structures=("RC",),
-            scratch_dir=str(tmp_path / "scratch"),
         )
-
-
-def test_main_returns_the_output_directory(tmp_path, stub_predictor, monkeypatch):
-    """output_kind = "files": run() hands back a folder and main.py zips it."""
-    from config import settings
-
-    monkeypatch.setattr(settings, "TEMP_DIR", str(tmp_path / "server_tmp"))
-    _write_scan(tmp_path / "input" / "patient01.nii.gz")
-    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND", "MAX"])
-
-    output_dir = AMASSSLogic.main(
-        input=str(tmp_path / "input"),
-        model=bundle,
-        structures=("MAND", "MAX"),
-        merge=("MERGED",),
-    )
-
-    assert os.path.isdir(output_dir)
-    # main.py names the streamed archive after this folder, so it must carry
-    # the run's identity rather than a generic "output".
-    assert os.path.basename(output_dir) == "AMASSS_Pred"
-
-    produced = os.listdir(output_dir)
-    assert "AMASSS_report.json" in produced
-    assert os.path.isfile(
-        os.path.join(output_dir, "patient01_Pred_SegOut", "patient01_Pred_MERGED.nii.gz")
-    )
-    with open(os.path.join(output_dir, "AMASSS_report.json")) as handle:
-        assert json.load(handle)["summary"]["processed"] == 1
-
-    # The bulky nnUNet intermediates are dropped before the response streams.
-    scratch_dir = os.path.dirname(output_dir)
-    assert not os.path.exists(os.path.join(scratch_dir, "nnunet_input"))
-    assert not glob.glob(os.path.join(scratch_dir, "pred_*"))
-
-
-# ---------------------------------------------------------------------------
-# schema: the multichoice arguments
-# ---------------------------------------------------------------------------
-
-def test_schema_is_valid():
-    """registry.py runs this at startup; a malformed declaration must not be
-    discovered by the first request that happens to hit the tool."""
-    AMASSSTool().check_schema()
-
-
-def test_structure_choices_are_display_names_with_declared_defaults():
-    spec = AMASSSTool.arguments["structures"]
-    assert spec.choices["Mandible"] is True
-    assert spec.choices["Skin"] is False
-    # Structures with no shipped model must not be offered at all.
-    assert not {"Teeth", "Root canal", "Mandibular canal"} & set(spec.choices)
-    # Declaration order is what the client renders, and it follows the
-    # anatomical grouping (Bones, Soft tissue, Masks).
-    assert list(spec.choices)[:2] == ["Mandible", "Maxilla"]
-    assert list(spec.choices)[-1] == "Maxilla (Mask)"
-
-
-@pytest.mark.parametrize(
-    "sent, expected",
-    [
-        ('{"Mandible": true, "Maxilla": true}', ("MAND", "MAX")),
-        ("Mandible,Maxilla", ("MAND", "MAX")),
-        # Whatever arrives is the complete selection: an option left out is
-        # off, whatever its declared default.
-        ('{"Skin": true}', ("SKIN",)),
-    ],
-)
-def test_structures_reach_run_as_codes(sent, expected):
-    cleaned = AMASSSTool().validate(
-        {"input": "/fake/scan.nii.gz", "model": "bundle", "structures": sent}
-    )
-    assert AMASSSLogic.structure_codes(cleaned["structures"]) == expected
-
-
-def test_validate_rejects_an_unknown_structure():
-    with pytest.raises(ToolArgumentError, match="Mandibule"):
-        AMASSSTool().validate(
-            {"input": "/fake/scan.nii.gz", "model": "bundle", "structures": "Mandibule"}
-        )
-
-
-def test_selection_maps_to_codes_in_declaration_order():
-    """Deterministic downstream behavior, whatever order the client sent."""
-    selection = Selection({"Skin": True, "Mandible": True, "Cervical vertebra": True})
-    assert AMASSSLogic.structure_codes(selection) == ("SKIN", "MAND", "CV")
-
-
-def test_omitted_optional_merge_falls_back_to_the_default():
-    """`merge` is optional; None must not silently disable merging."""
-    assert AMASSSLogic.merge_modes(None) == AMASSSLogic.DEFAULT_MERGE_MODES
-    assert AMASSSLogic.merge_modes(Selection(AMASSSLogic.MERGE_CHOICES)) == ("MERGED",)
-
-
-def test_merge_is_a_multichoice_so_both_forms_can_be_requested_together():
-    """Regression: `merge` shipped as "choice" once. base.py hands a "choice"
-    argument to run() as the bare option-name STRING, which _codes_from's
-    iterable branch split into characters -- no merge mode ever matched, and a
-    full run came back as a 556-byte zip holding nothing but the report."""
-    spec = AMASSSTool.arguments["merge"]
-    assert spec.types[0] == "multichoice"
-
-
-@pytest.mark.parametrize(
-    "sent, expected",
-    [
-        # What a "choice"-typed schema (or a naive direct caller) passes: one
-        # bare string, display name or code -- never to be iterated as chars.
-        ("Separated segmentation files", ("SEPARATE",)),
-        ("SEPARATE", ("SEPARATE",)),
-        # Display names inside an iterable are translated like codes are.
-        (("One merged segmentation file", "SEPARATE"), ("MERGED", "SEPARATE")),
-        # The real HTTP shape now that merge is a multichoice.
-        (Selection({"One merged segmentation file": True, "Separated segmentation files": True}),
-         ("MERGED", "SEPARATE")),
-    ],
-)
-def test_merge_modes_accepts_every_legitimate_shape(sent, expected):
-    assert AMASSSLogic.merge_modes(sent) == expected
 
 
 def test_segment_rejects_an_unknown_merge_mode(tmp_path):
     """An unrecognised merge mode must fail before inference, not surface as a
     run that "succeeds" while writing zero segmentation files."""
     _write_scan(tmp_path / "input" / "patient01.nii.gz")
-    with pytest.raises(ValueError, match="Unknown merge mode"):
-        AMASSSLogic.segment(
+    with pytest.raises(ToolInputError, match="Unknown merge mode"):
+        pipeline.segment(
             input_path=str(tmp_path / "input"),
             model_path=str(tmp_path),
+            output_dir=str(tmp_path / "out"),
             structures=("MAND",),
             merge=("SEPARATED",),  # plausible typo for SEPARATE
-            scratch_dir=str(tmp_path / "scratch"),
         )
 
 
 def test_segment_rejects_an_empty_selection(tmp_path):
-    """Every box unchecked is a valid Selection, so the schema cannot catch it."""
+    """`structures=[]` is a valid list, so the schema cannot catch it."""
     _write_scan(tmp_path / "input" / "patient01.nii.gz")
-    with pytest.raises(ToolArgumentError, match="at least one structure"):
-        AMASSSLogic.segment(
+    with pytest.raises(ToolInputError, match="at least one structure"):
+        pipeline.segment(
             input_path=str(tmp_path / "input"),
             model_path=str(tmp_path),
+            output_dir=str(tmp_path / "out"),
             structures=(),
-            scratch_dir=str(tmp_path / "scratch"),
         )
 
 
+@pytest.mark.parametrize(
+    "sent, expected",
+    [
+        # One bare string -- never to be iterated as characters. `merge` shipped
+        # as a "choice" once and _codes_from split it into chars, so no mode
+        # matched and a full run came back holding nothing but the report.
+        ("Separated segmentation files", ("SEPARATE",)),
+        ("SEPARATE", ("SEPARATE",)),
+        # Display names inside a list are translated like codes are.
+        (["One merged segmentation file", "SEPARATE"], ("MERGED", "SEPARATE")),
+        # The old base.Selection shape is still accepted.
+        ({"One merged segmentation file": True, "Separated segmentation files": True},
+         ("MERGED", "SEPARATE")),
+    ],
+)
+def test_merge_modes_accepts_every_legitimate_shape(sent, expected):
+    assert catalog.merge_modes(sent) == expected
+
+
+def test_omitted_optional_merge_falls_back_to_the_default():
+    assert catalog.merge_modes(None) == catalog.DEFAULT_MERGE_MODES
+
+
+def test_structures_with_no_shipped_model_are_not_offered():
+    """Offering a structure with no model is worse than not offering it."""
+    assert not {"TEETH", "RC", "MCAN"} & set(catalog.STRUCTURE_CODES)
+    assert catalog.structure_codes(["Mandible", "Maxilla"]) == ("MAND", "MAX")
+
+
 # ---------------------------------------------------------------------------
-# GPU resampling (see settings.AMASSS_GPU_RESAMPLING)
+# GPU resampling
 # ---------------------------------------------------------------------------
 
 class _FakeConfigurationManager:
@@ -574,7 +575,6 @@ def test_gpu_resampling_leaves_a_non_default_resampler_alone():
 
 def test_gpu_resampling_redirects_both_ends_and_drops_the_memoized_value():
     """Both resamplers move to the GPU, and the cached property does not survive."""
-    pytest.importorskip("torch")
     predictor = _fake_predictor()
     manager = predictor.configuration_manager
 
@@ -594,33 +594,9 @@ def test_gpu_resampling_redirects_both_ends_and_drops_the_memoized_value():
     assert manager.resampling_fn_data == "resample_torch_fornnunet"
 
 
-def test_report_records_the_settings_that_move_the_masks(tmp_path, stub_predictor):
-    """GPU resampling and the step size both change the output, so a mask is
-    only reproducible next to the values that produced it."""
-    _write_scan(tmp_path / "input" / "patient01.nii.gz")
-    bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
-
-    run = AMASSSLogic.segment(
-        input_path=str(tmp_path / "input"),
-        model_path=bundle,
-        structures=("MAND",),
-        scratch_dir=str(tmp_path / "scratch"),
-    )
-
-    # resolve_device is stubbed to "cpu", where the GPU path cannot apply.
-    assert run.report["gpu_resampling"] is False
-    assert run.report["tile_step_size"] == float(settings.AMASSS_TILE_STEP_SIZE)
-
-
-def test_converted_input_keeps_its_voxel_type(tmp_path):
-    """Casting to float32 doubled the bytes gzipped per scan and bought nothing."""
-    source = _write_scan(tmp_path / "scan.nrrd")
-    destination = str(tmp_path / "p_000_0000.nii.gz")
-
-    AMASSSLogic._convert_to_nifti(source, destination)
-
-    assert sitk.ReadImage(destination).GetPixelID() == sitk.ReadImage(source).GetPixelID()
-
+# ---------------------------------------------------------------------------
+# surfaces
+# ---------------------------------------------------------------------------
 
 def test_surfaces_are_written_as_binary_vtk(tmp_path):
     """ASCII was the default, and it was both the bulkiest and the lossiest.
@@ -629,10 +605,8 @@ def test_surfaces_are_written_as_binary_vtk(tmp_path):
     segmentation, purely because every coordinate was a decimal string -- and
     printing them to ~6 significant digits moved vertices by up to 5e-05mm.
     """
-    vtk = pytest.importorskip("vtk")
+    import vtk
     from vtk.util.numpy_support import vtk_to_numpy
-
-    from tools.AMASSS.src import vtk_export
 
     volume = np.zeros((30, 30, 30), dtype=np.uint8)
     volume[10:20, 10:20, 10:20] = 1
@@ -664,9 +638,6 @@ def test_surfaces_are_written_as_binary_vtk(tmp_path):
 
 def test_mesh_temp_file_does_not_outlive_the_call(tmp_path):
     """The scratch .nrrd used to have a fixed name and was never removed."""
-    pytest.importorskip("vtk")
-    from tools.AMASSS.src import vtk_export
-
     volume = np.zeros((20, 20, 20), dtype=np.uint8)
     volume[5:15, 5:15, 5:15] = 1
     reference = sitk.GetImageFromArray(volume)
@@ -680,9 +651,6 @@ def test_decimation_reduces_triangles_and_zero_disables_it(tmp_path):
     """Raw marching cubes on a CBCT grid yields meshes nothing downstream can
     open (1.6M triangles for a cranial base); decimation is what makes the
     .vtk usable, and 0 must still give the untouched mesh back."""
-    pytest.importorskip("vtk")
-    from tools.AMASSS.src import vtk_export
-
     volume = np.zeros((40, 40, 40), dtype=np.uint8)
     zz, yy, xx = np.ogrid[:40, :40, :40]
     volume[((zz - 20) ** 2 + (yy - 20) ** 2 + (xx - 20) ** 2) < 225] = 1
@@ -701,17 +669,62 @@ def test_decimation_reduces_triangles_and_zero_disables_it(tmp_path):
     assert raw.GetCellData().GetScalars().GetNumberOfTuples() == raw.GetNumberOfCells()
 
 
-def test_report_records_the_decimation_applied(tmp_path, stub_predictor):
-    """The surfaces are lossy by default now, so the run has to say by how much."""
-    _write_scan(tmp_path / "input" / "patient01.nii.gz")
+def test_surfaces_are_produced_alongside_the_segmentations(tmp_path, stub_predictor):
+    _write_scan(tmp_path / "input" / "patient01.nii.gz", size=(24, 24, 24))
     bundle = _make_model_bundle(tmp_path / "bundle", ["MAND"])
 
-    run = AMASSSLogic.segment(
+    report = pipeline.segment(
         input_path=str(tmp_path / "input"),
         model_path=bundle,
+        output_dir=str(tmp_path / "out"),
         structures=("MAND",),
-        scratch_dir=str(tmp_path / "scratch"),
+        merge=("SEPARATE",),
+        generate_surface=True,
     )
 
-    # No surfaces requested -> nothing to report.
-    assert run.report["surface_decimation"] is None
+    surfaces = [path for scan in report["scans"] for path in scan["surfaces"]]
+    assert [os.path.basename(p) for p in surfaces] == ["patient01_Pred_MAND.vtk"]
+    assert os.path.getsize(surfaces[0]) > 0
+    assert report["surface_decimation"] == 90
+
+
+# ---------------------------------------------------------------------------
+# the real models
+# ---------------------------------------------------------------------------
+
+REAL_MODELS = os.environ.get("SADT_AMASSS_MODELS")
+REAL_SCAN = os.environ.get("SADT_AMASSS_SCAN")
+
+
+@pytest.mark.gpu
+@pytest.mark.models
+@pytest.mark.skipif(
+    not (REAL_MODELS and REAL_SCAN),
+    reason="set SADT_AMASSS_MODELS and SADT_AMASSS_SCAN (see tests/data/README.md)",
+)
+def test_real_models_segment_a_real_scan(tmp_path):
+    """The shipped bundle on a real CBCT, on the GPU.
+
+    Masks are compared against the pre-port implementation separately (see
+    README, "Validated against"); what this asserts is that the real bundle,
+    the real scan geometry and the GPU resampling path survive the repackaging.
+    """
+    output = run(
+        scans=Path(REAL_SCAN),
+        model=Path(REAL_MODELS),
+        output_dir=tmp_path / "out",
+        structures=["MAND", "MAX", "CB"],
+        merge=["MERGED", "SEPARATE"],
+    )
+
+    with open(output / "AMASSS_report.json") as handle:
+        report = json.load(handle)
+
+    assert report["summary"] == {"total": 1, "processed": 1, "failed": 0}
+    assert report["predicted_structures"] == ["MAND", "MAX", "CB"]
+    assert report["device"].startswith("cuda")
+    assert report["gpu_resampling"] is True
+
+    merged = next((output).rglob("*_MERGED.nii.gz"))
+    labels = set(np.unique(sitk.GetArrayFromImage(sitk.ReadImage(str(merged)))).tolist())
+    assert labels == {0, catalog.LABELS["MAND"], catalog.LABELS["MAX"], catalog.LABELS["CB"]}

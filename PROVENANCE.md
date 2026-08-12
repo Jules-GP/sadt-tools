@@ -14,7 +14,7 @@ information in full, including the pins kept and the changes made.
 | Tool | Upstream path | Upstream commit | Ported | Algorithm modified |
 |---|---|---|---|---|
 | [surgmovpred](tools/surgmovpred/) | `SurgMovPred_CLI/SurgMovPred_CLI.py` | `d7702ae` (2026-06-24) | 2026-08-12 | no — repackaging only. Model load order sorted for reproducibility, both result tables returned instead of one; predictions bit-identical to the pre-port implementation. |
-| [amasss](tools/amasss/) | — | — | not migrated yet | — |
+| [amasss](tools/amasss/) | `AMASSS_CLI/` | `21a62a8` (2026-05-22) | 2026-08-12 | no — repackaging only. Pinned to the deployed stack (torch 2.8.0+cu128, nnunetv2 2.8.1) rather than upstream's declared torch 2.2.0 / nnunetv2 2.8.0; masks bit-identical to the pre-port implementation, within nnUNet's own CUDA nondeterminism. |
 | [aso](tools/aso/) | — | — | not migrated yet | — |
 | [ali](tools/ali/) | — | — | not migrated yet | — |
 | [crownseg](tools/crownseg/) | — | — | not migrated yet | — |

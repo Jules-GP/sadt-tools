@@ -1,9 +1,8 @@
 """Surface (.vtk) generation from a segmentation, for AMASSS's
 "generate surface file" option.
 
-This stays SERVER-side on purpose: AMASSS is an API other tools call (AREG
-today), so generating surfaces in the Slicer client would make them
-unavailable to every non-Slicer consumer.
+Surfaces are generated here rather than in the Slicer client so that every
+consumer gets them, not only the ones running inside Slicer.
 
 The mesh pipeline is kept identical to the original CLI's (SimpleITK ->
 temporary .nrrd -> vtkNrrdReader -> vtkDiscreteMarchingCubes ->
@@ -15,44 +14,21 @@ parsing it out of the output FILE NAME and looking it up in `LABELS["LARGE"]`,
 a KeyError for any structure absent from that table which aborted the whole
 scan. The structure code is passed in explicitly now.
 
-vtk is imported lazily so the server still boots without it.
+vtk, numpy and SimpleITK are imported inside the functions that use them. They
+are hard dependencies of this package now -- the server-side port had to cope
+with them being absent, and `is_available()` plus its ToolUnavailableError
+guard went with that -- but schema generation still imports this module and
+must not pay for them.
 """
 
 import logging
 import os
 import uuid
 
-import numpy as np
-import SimpleITK as sitk
-
-from base import ToolUnavailableError
-
-logger = logging.getLogger("AMASSS.vtk")
-
-_INSTALL_HINT = (
-    "Surface generation needs VTK. Install it with "
-    "`pip install -r requirements.txt`, or run AMASSS with "
-    "generate_surface=false."
-)
+logger = logging.getLogger(__name__)
 
 
-def _import_vtk():
-    try:
-        import vtk
-    except ImportError as exc:  # pragma: no cover - depends on the deployment
-        raise ToolUnavailableError(_INSTALL_HINT) from exc
-    return vtk
-
-
-def is_available() -> bool:
-    try:
-        import vtk  # noqa: F401
-    except ImportError:
-        return False
-    return True
-
-
-def _mesh_from_mask(mask: np.ndarray, reference: sitk.Image, temp_dir: str,
+def _mesh_from_mask(mask, reference, temp_dir: str,
                     smoothing: int, color_rgb, decimation: int = 0):
     """Build a colored surface for one binary mask.
 
@@ -60,7 +36,9 @@ def _mesh_from_mask(mask: np.ndarray, reference: sitk.Image, temp_dir: str,
     marching-cubes mesh). See the `surface_decimation` argument in AMASSS.py
     for why the default is not 0.
     """
-    vtk = _import_vtk()
+    import numpy as np
+    import SimpleITK as sitk
+    import vtk
     from vtk.util.numpy_support import numpy_to_vtk
 
     binary = sitk.GetImageFromArray(mask.astype(np.uint8))
@@ -129,7 +107,8 @@ def _mesh_from_mask(mask: np.ndarray, reference: sitk.Image, temp_dir: str,
 
 
 def _write(polydata, output_path: str) -> None:
-    vtk = _import_vtk()
+    import vtk
+
     writer = vtk.vtkPolyDataWriter()
     writer.SetFileName(output_path)
     writer.SetInputData(polydata)
@@ -149,7 +128,7 @@ def _write(polydata, output_path: str) -> None:
     writer.Write()
 
 
-def write_separate_surface(mask: np.ndarray, reference: sitk.Image, structure_code: str,
+def write_separate_surface(mask, reference, structure_code: str,
                            label_colors: dict, labels: dict, temp_dir: str,
                            smoothing: int, output_path: str, decimation: int = 0) -> str:
     """One binary structure -> one .vtk.
@@ -167,11 +146,12 @@ def write_separate_surface(mask: np.ndarray, reference: sitk.Image, structure_co
     return output_path
 
 
-def write_merged_surface(merged: np.ndarray, reference: sitk.Image, names_from_labels: dict,
+def write_merged_surface(merged, reference, names_from_labels: dict,
                          label_colors: dict, temp_dir: str, smoothing: int,
                          output_path: str, decimation: int = 0) -> str:
     """A multi-label volume -> one .vtk holding every structure's surface."""
-    vtk = _import_vtk()
+    import numpy as np
+    import vtk
 
     append = vtk.vtkAppendPolyData()
     surfaces = 0

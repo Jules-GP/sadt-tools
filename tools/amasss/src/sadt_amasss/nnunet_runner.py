@@ -1,75 +1,48 @@
 """nnUNet v2 inference, isolated from the rest of the AMASSS pipeline.
 
-Four things this module gets right that the original Slicer CLI did not:
+Three things this module gets right that the original Slicer CLI did not:
 
 1. No `nnUNet_results` environment variable. The CLI set it before spawning
    `nnUNetv2_predict`, and `os.environ` is process-global: two overlapping
-   AMASSS requests would overwrite each other's model path.
+   AMASSS runs would overwrite each other's model path.
    `initialize_from_trained_model_folder` takes an explicit path instead.
 2. No output-file polling. The CLI killed the predictor once the output file
    stopped growing for three seconds, which could interrupt nnUNet
    mid-postprocessing. The Python API simply returns when it is done.
-3. GPU work is serialized by a semaphore: one card cannot hold several
-   concurrent 3d_fullres inferences, whatever MAX_CONCURRENT_TOOLS allows.
-4. The resampling runs on the GPU too (see `_enable_gpu_resampling`), which is
+3. The resampling runs on the GPU too (see `_enable_gpu_resampling`), which is
    where the run time actually went -- the network was an eighth of it.
 
-torch and nnunetv2 are imported lazily: registry.py imports every tool at
-startup, and a missing deep-learning stack must fail AMASSS alone, not the
-whole server.
+The server-side port also held a `threading.BoundedSemaphore` here, because
+every tool shared one process. A tool is now its own process invoked by the
+runner, so serialising GPU work is the server's job and the semaphore is gone.
+
+torch and nnunetv2 are still imported lazily even though the lockfile
+guarantees them: `scripts/describe.py` imports this package on every CI run to
+publish the schema, and that must not pay for a CUDA stack.
 """
 
 import glob
 import inspect
 import logging
 import os
-import threading
 
-from base import ToolUnavailableError
-from config import settings
+from .errors import ModelNotFoundError
 
-logger = logging.getLogger("AMASSS.nnunet")
+logger = logging.getLogger(__name__)
 
 CHECKPOINT_NAME = "checkpoint_final.pth"
 PLANS_FOLDER_PATTERN = "*__nnUNetPlans__3d_fullres"
 
-# See settings.AMASSS_MAX_GPU_JOBS for what a higher value does and does not
-# buy. Read through config like every other setting, never from os.getenv.
-_MAX_GPU_JOBS = max(1, int(settings.AMASSS_MAX_GPU_JOBS))
-_GPU_SEMAPHORE = threading.BoundedSemaphore(_MAX_GPU_JOBS)
-
-_INSTALL_HINT = (
-    "AMASSS needs the nnUNet v2 inference stack. Install it with "
-    "`pip install -r requirements.txt` (see server/README.md)."
-)
-
-
-class ModelNotFoundError(FileNotFoundError):
-    """No usable nnUNet model folder for a requested structure."""
-
-
-def _import_torch():
-    try:
-        import torch
-    except ImportError as exc:  # pragma: no cover - depends on the deployment
-        raise ToolUnavailableError(f"{_INSTALL_HINT} (missing: torch)") from exc
-    return torch
-
-
-def _import_predictor():
-    try:
-        from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-    except ImportError as exc:  # pragma: no cover - depends on the deployment
-        raise ToolUnavailableError(f"{_INSTALL_HINT} (missing: nnunetv2)") from exc
-    return nnUNetPredictor
-
 
 def resolve_device(requested: str) -> str:
     """Return the device to actually use, falling back to CPU when needed."""
-    torch = _import_torch()
+    import torch
+
     wanted = (requested or "cpu").strip().lower()
     if wanted.startswith("cuda") and not torch.cuda.is_available():
-        logger.warning("DEVICE=%s requested but CUDA is unavailable; falling back to CPU", requested)
+        logger.warning(
+            "device=%s requested but CUDA is unavailable; falling back to CPU", requested
+        )
         return "cpu"
     return wanted
 
@@ -99,20 +72,20 @@ def find_model_folder(model_root: str, structure_code: str):
     return None
 
 
-def _build_predictor(device: str):
+def _build_predictor(device: str, tile_step_size: float):
     """Instantiate an nnUNetPredictor, tolerating nnUNet's renamed kwargs.
 
     nnUNet 2.x renamed `perform_everything_on_gpu` to
     `perform_everything_on_device` mid-series; passing whichever the installed
     version declares keeps this working across the range.
     """
-    torch = _import_torch()
-    nnUNetPredictor = _import_predictor()
+    import torch
+    from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
     options = {
-        # See settings.AMASSS_TILE_STEP_SIZE: this is the one knob here that
-        # changes the segmentation, so it stays configurable rather than tuned.
-        "tile_step_size": float(settings.AMASSS_TILE_STEP_SIZE),
+        # The one knob here that changes the segmentation, so it is an argument
+        # rather than something tuned in place. See run()'s docstring.
+        "tile_step_size": float(tile_step_size),
         "use_gaussian": True,
         # Equivalent to the CLI's --disable_tta: no test-time mirroring.
         "use_mirroring": False,
@@ -142,16 +115,16 @@ def _enable_gpu_resampling(predictor, device: str) -> bool:
     """Point this predictor's resamplers at the GPU. Returns whether it applied.
 
     Resampling, not inference, is what makes AMASSS slow: nnUNet's defaults are
-    scipy splines on one core and outweigh the network by roughly seven to one
-    (numbers in settings.AMASSS_GPU_RESAMPLING). nnUNet ships torch
-    equivalents, so there is nothing to reimplement, only to select.
+    scipy splines on one core and outweigh the network by roughly seven to one.
+    nnUNet ships torch equivalents, so there is nothing to reimplement, only to
+    select.
 
     Selected by NAME: nnUNet resolves both resampling functions out of the
     configuration dict via `recursive_find_resampling_fn_by_name`, so rewriting
     the two names redirects both ends. No monkeypatching.
 
     Mutating that dict is safe because PlansManager hands out a `deepcopy`: it
-    touches neither the shared plans nor a concurrent request, and the
+    touches neither the shared plans nor a concurrent run, and the
     `torch.device` put in here never reaches the `plans.json` nnUNet writes
     beside its output (which `json.dump` could not serialize).
     """
@@ -166,7 +139,8 @@ def _enable_gpu_resampling(predictor, device: str) -> bool:
         logger.info("This nnUNet has no torch resampler; keeping the scipy one")
         return False
 
-    torch = _import_torch()
+    import torch
+
     configuration_manager = predictor.configuration_manager
     configuration = configuration_manager.configuration
 
@@ -179,7 +153,7 @@ def _enable_gpu_resampling(predictor, device: str) -> bool:
         # 'linear' is order 1, already what the plans ask for on the
         # probabilities. The input data drops from order 3 to order 1 (torch
         # has no 3D cubic interpolation): that is the whole numerical
-        # difference, and settings.AMASSS_GPU_RESAMPLING carries its Dice table.
+        # difference, and it is what `gpu_resampling=False` turns off.
         configuration[f"{key}_kwargs"] = {
             "is_seg": False,
             "device": torch.device(device),
@@ -195,7 +169,14 @@ def _enable_gpu_resampling(predictor, device: str) -> bool:
     return True
 
 
-def predict_folder(model_folder: str, input_dir: str, output_dir: str, device: str) -> None:
+def predict_folder(
+    model_folder: str,
+    input_dir: str,
+    output_dir: str,
+    device: str,
+    tile_step_size: float,
+    gpu_resampling: bool,
+) -> None:
     """Segment every `*_0000.nii.gz` in `input_dir`, writing masks to `output_dir`.
 
     A whole folder per call is deliberate: the model is loaded once per
@@ -204,39 +185,43 @@ def predict_folder(model_folder: str, input_dir: str, output_dir: str, device: s
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    with _GPU_SEMAPHORE:
-        predictor = _build_predictor(device)
-        # Explicit path: no nnUNet_results env var, hence no cross-request race.
-        predictor.initialize_from_trained_model_folder(
-            model_folder,
-            use_folds=(0,),
-            checkpoint_name=CHECKPOINT_NAME,
+    predictor = _build_predictor(device, tile_step_size)
+    # Explicit path: no nnUNet_results env var, hence no cross-run race.
+    predictor.initialize_from_trained_model_folder(
+        model_folder,
+        use_folds=(0,),
+        checkpoint_name=CHECKPOINT_NAME,
+    )
+
+    on_gpu = bool(gpu_resampling) and _enable_gpu_resampling(predictor, device)
+
+    if on_gpu:
+        # `predict_from_files` fans preprocessing and export out to SPAWNED
+        # processes, each of which would need its own CUDA context to run a
+        # GPU resampler. The GPU path therefore runs everything in this
+        # process, trading away the CPU/GPU overlap on multi-scan batches --
+        # a smaller loss than the resampling win.
+        predictor.predict_from_files_sequential(
+            input_dir,
+            output_dir,
+            save_probabilities=False,
+            overwrite=True,
+        )
+    else:
+        predictor.predict_from_files(
+            input_dir,
+            output_dir,
+            save_probabilities=False,
+            overwrite=True,
+            num_processes_preprocessing=2,
+            num_processes_segmentation_export=2,
         )
 
-        on_gpu = bool(settings.AMASSS_GPU_RESAMPLING) and _enable_gpu_resampling(predictor, device)
 
-        if on_gpu:
-            # `predict_from_files` fans preprocessing and export out to SPAWNED
-            # processes, each of which would need its own CUDA context to run a
-            # GPU resampler. The GPU path therefore runs everything in this
-            # process, trading away the CPU/GPU overlap on multi-scan batches --
-            # a smaller loss than the resampling win, and recovering it with a
-            # reader thread feeding the GPU is the obvious next step.
-            predictor.predict_from_files_sequential(
-                input_dir,
-                output_dir,
-                save_probabilities=False,
-                overwrite=True,
-            )
-        else:
-            predictor.predict_from_files(
-                input_dir,
-                output_dir,
-                save_probabilities=False,
-                overwrite=True,
-                num_processes_preprocessing=2,
-                num_processes_segmentation_export=2,
-            )
-        # TODO: cache predictors across requests, keyed by (model_folder,
-        # device). Deliberately not done here -- it needs an eviction policy and
-        # GPU-memory accounting, which CLAUDE.md lists as out of scope.
+__all__ = [
+    "CHECKPOINT_NAME",
+    "ModelNotFoundError",
+    "find_model_folder",
+    "predict_folder",
+    "resolve_device",
+]
