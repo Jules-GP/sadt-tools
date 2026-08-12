@@ -82,8 +82,16 @@ tools/<name>/
 ├── src/sadt_<name>/
 │   ├── __init__.py       # defines run()
 │   └── ...               # the ported implementation
-└── tests/test_run.py     # calls run() end to end
+├── tests/
+│   ├── test_run.py       # calls run() end to end
+│   └── test_integration.py   # runs it out of process, and any tool it chains with
+└── ...
 ```
+
+`testkit/` holds `sadt-testkit`, a **development-only** package that lets one
+tool's tests run another through that tool's own venv, as a subprocess. It is
+how a tool whose input is another tool's output gets tested against the real
+thing without importing it. See [testkit/README.md](testkit/README.md).
 
 ## Scripts
 

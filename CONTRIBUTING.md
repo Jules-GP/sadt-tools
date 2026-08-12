@@ -166,6 +166,24 @@ checksums** — never large binaries, never patient data, and the fixtures must 
 anonymised and public-domain. If no suitable public sample exists, ask before
 committing anything.
 
+**When a tool's input is another tool's output**, test against the real thing
+rather than a stand-in. `sadt-testkit` runs the other tool through *its* venv as
+a subprocess — the way the server does — so nothing is imported across tools:
+
+```python
+from sadt_testkit import is_built, run_tool
+
+@pytest.mark.skipif(not is_built("crownseg"), reason="run uv sync in tools/crownseg")
+def test_on_freshly_segmented_meshes(tmp_path):
+    segmented = run_tool("crownseg", meshes=..., model=..., output_dir=tmp_path / "seg")
+    run(scans=segmented, model=..., output_dir=tmp_path / "out")
+```
+
+Skip, never fail, when the other tool is not built: CI builds each tool in its
+own job. `tools/_template/tests/test_integration.py` is the file to copy, and
+[testkit/README.md](testkit/README.md) covers the rest. This is a **development
+dependency**; `run()` itself still must not call another tool.
+
 GPU tests carry `@pytest.mark.gpu`. CI skips them (`-m "not gpu"`) because the
 runner has no CUDA device, which makes them your responsibility: run them by
 hand and state in the PR that you did and what came out.

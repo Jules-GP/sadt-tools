@@ -1959,6 +1959,7 @@ segmentation = [
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
+    { name = "sadt-testkit" },
 ]
 
 [package.metadata]
@@ -1972,7 +1973,23 @@ requires-dist = [
 provides-extras = ["segmentation"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = "==8.3.4" }]
+dev = [
+    { name = "pytest", specifier = "==8.3.4" },
+    { name = "sadt-testkit", editable = "../../testkit" },
+]
+
+[[package]]
+name = "sadt-testkit"
+version = "0.1.0"
+source = { editable = "../../testkit" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "numpy", specifier = "==1.26.4" },
+    { name = "pytest", specifier = "==8.3.4" },
+]
 
 [[package]]
 name = "safetensors"

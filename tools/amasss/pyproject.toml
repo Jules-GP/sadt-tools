@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest==8.3.4"]
+dev = ["pytest==8.3.4", "sadt-testkit"]
 
 [build-system]
 requires = ["hatchling"]
@@ -36,6 +36,11 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
+# Development only: lets this tool's tests run ANOTHER tool through that tool's
+# own venv, as a subprocess, the way the server does. It has no dependencies of
+# its own, so it cannot perturb the resolution above. Never move it into
+# [project] dependencies -- see testkit/README.md.
+sadt-testkit = { path = "../../testkit", editable = true }
 torch = { index = "pytorch-cu128" }
 
 [tool.pytest.ini_options]
