@@ -87,3 +87,23 @@ def test_runs_on_gpu():
     you ran `pytest -m gpu` and what came out.
     """
     pytest.skip("the template has no GPU path")
+
+
+def test_pooled_reduction_collapses_the_batch_to_one_row(scans, tmp_path):
+    """The `Literal` single-select: exactly one of a fixed set."""
+    output = run(scans=scans, output_dir=tmp_path / "out", reduction="pooled")
+
+    lines = output.read_text().splitlines()
+    assert len(lines) == 1
+    # arange(100) above 0 is 1..99, plus 100 voxels of 7.0.
+    assert lines[0].startswith("scan=all voxels=199")
+
+
+def test_an_option_outside_the_published_set_is_refused(scans, tmp_path):
+    """`Literal` is published as `choices`, not enforced by Python.
+
+    The runner calls run(**params) from a JSON object, so a stale client or a
+    direct caller can still send anything. The tool checks.
+    """
+    with pytest.raises(ToolInputError, match="Unknown reduction"):
+        run(scans=scans, output_dir=tmp_path / "out", reduction="median")

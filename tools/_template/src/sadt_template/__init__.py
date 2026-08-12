@@ -10,9 +10,9 @@ What this placeholder computes (intensity statistics over `.npy` arrays) is not
 the point and is meant to be deleted. The five rules it demonstrates are:
 
 1. Stdlib annotations only -- `Path`, `str`, `int`, `float`, `bool`,
-   `list[...]`. describe.py refuses anything else rather than guess, so an
-   `Optional[int]` or a custom marker type fails the build instead of shipping
-   a wrong schema to the client.
+   `Literal[...]` and `list[...]` of those. describe.py refuses anything else
+   rather than guess, so an `Optional[int]` or a custom marker type fails the
+   build instead of shipping a wrong schema to the client.
 2. No default means required. That is the *only* place `required` comes from.
 3. Batch input. `scans` takes a directory as readily as one file: the server
    pays a process start-up cost per call, so a folder of 40 scans must be one
@@ -21,9 +21,18 @@ the point and is meant to be deleted. The five rules it demonstrates are:
    job; a module-level `import torch` would make schema generation cost a CUDA
    stack and fail on a machine that has none.
 5. Everything written goes under `output_dir`, which the caller owns.
+6. An argument with a fixed set of options says so with `Literal[...]`, and
+   describe.py publishes them as `choices` for the client to render as a
+   picker. `list[Literal[...]]` is several-of, a bare `Literal[...]` is
+   exactly-one -- the old schema's "multichoice" and "choice". Saying it in the
+   annotation is the point: a separate table of options drifts from the code,
+   which is what the `ArgSpec.choices` it replaces used to do.
+7. Nothing here unpacks a `.zip`. The server unpacks archives before `run()`
+   is called, so a tool always receives a real file or directory.
 """
 
 from pathlib import Path
+from typing import Literal
 
 from .pipeline import summarise
 
@@ -31,7 +40,8 @@ from .pipeline import summarise
 def run(
     scans: Path,
     output_dir: Path,
-    metrics: list[str] = ["mean", "max"],
+    metrics: list[Literal["mean", "max", "min", "std"]] = ["mean", "max"],
+    reduction: Literal["per_scan", "pooled"] = "per_scan",
     threshold: float = 0.0,
     per_scan_report: bool = False,
 ) -> Path:
@@ -44,7 +54,8 @@ def run(
     Args:
         scans: One `.npy` array, or a folder of them for a batch.
         output_dir: Where results are written. Nothing is written outside it.
-        metrics: Statistics to compute, from "mean", "max", "min", "std".
+        metrics: Statistics to compute. Several may be chosen.
+        reduction: Whether to report one row per scan or one row for the batch.
         threshold: Ignore voxels at or below this intensity.
         per_scan_report: Also write one `<scan>.txt` next to the summary.
 
@@ -58,6 +69,7 @@ def run(
         scans=Path(scans),
         output_dir=Path(output_dir),
         metrics=metrics,
+        reduction=reduction,
         threshold=threshold,
         per_scan_report=per_scan_report,
     )
