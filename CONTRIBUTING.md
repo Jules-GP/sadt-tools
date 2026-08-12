@@ -72,9 +72,11 @@ without one.
 client. Write it as a clinical action, not an implementation note. Everything
 after it is for maintainers and never reaches the UI.
 
-**Write only under `output_dir`.** `run()` returns a `Path`, or a
-`dict[str, Path]` when there are several named outputs. It must not write beside
-its inputs, into the working directory or anywhere else.
+**Write only under `output_dir`.** Every tool takes it as a required `Path`
+argument. `run()` returns a `Path`, or a `dict[str, Path]` when there are
+several named outputs, and it must not write beside its inputs, into the working
+directory or anywhere else. `output/` at the repository root is gitignored —
+point a manual run at it rather than scattering results through the tree.
 
 **`run()` does not read the environment, does not know about `/DATA`, and does
 not call another tool.** Path resolution and tool sequencing belong to the
