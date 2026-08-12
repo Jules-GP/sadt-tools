@@ -49,8 +49,13 @@ the missing label colours, the `CAN` code that matched nothing, the
 | GPU | Used when available; `device="cpu"` works and is much slower. CUDA falls back to CPU with a warning when no card is visible. |
 
 Structure codes: `MAND`, `MAX`, `CB`, `CV`, `UAW`, `SKIN`, `CBMASK`,
-`MANDMASK`, `MAXMASK`. The display names the old schema published ("Cranial
-base", …) are still accepted. `TEETH`, `RC` and `MCAN` are deliberately absent —
+`MANDMASK`, `MAXMASK` — published as the argument's `choices`, so a client can
+render them without a second declaration. The display names the old schema
+published ("Cranial base", …) are still accepted but not offered.
+
+`Literal` cannot be built from `catalog.STRUCTURE_CODES` (it takes literals
+only), so the set is written twice and a test asserts the two agree. A structure
+added to the catalog and not to `run()` would be unselectable from the client. `TEETH`, `RC` and `MCAN` are deliberately absent —
 no model ships for them, and offering them produced either a KeyError during
 surface export or a silent collision onto the mandible's label.
 

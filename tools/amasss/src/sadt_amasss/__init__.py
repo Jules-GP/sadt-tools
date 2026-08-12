@@ -5,6 +5,7 @@ folder of them. The pipeline is in pipeline.py; only `run` is public.
 """
 
 from pathlib import Path
+from typing import Literal
 
 from .catalog import merge_modes, structure_codes
 from .pipeline import segment
@@ -14,13 +15,19 @@ def run(
     scans: Path,
     model: Path,
     output_dir: Path,
-    structures: list[str] = ["MAND", "MAX", "CB", "CV", "UAW"],
-    merge: list[str] = ["MERGED"],
+    # The options are spelled out because `Literal` takes literals only -- it
+    # cannot be built from catalog.STRUCTURE_CODES. That makes this a second
+    # declaration of the same set, which is the thing this contract otherwise
+    # avoids, so a test asserts the two agree.
+    structures: list[
+        Literal["MAND", "MAX", "CB", "CV", "UAW", "SKIN", "CBMASK", "MANDMASK", "MAXMASK"]
+    ] = ["MAND", "MAX", "CB", "CV", "UAW"],
+    merge: list[Literal["MERGED", "SEPARATE"]] = ["MERGED"],
     prediction_ID: str = "Pred",
     generate_surface: bool = False,
     surface_smoothing: int = 5,
     surface_decimation: int = 90,
-    device: str = "cuda",
+    device: Literal["cuda", "cpu"] = "cuda",
     tile_step_size: float = 0.5,
     gpu_resampling: bool = True,
 ) -> Path:
@@ -36,12 +43,13 @@ def run(
         output_dir: Where results are written -- one `<scan>_<ID>_SegOut/`
             folder per scan, plus `AMASSS_report.json`. Nothing is written
             outside it.
-        structures: Structure codes to segment: MAND (mandible), MAX (maxilla),
+        structures: Structures to segment: MAND (mandible), MAX (maxilla),
             CB (cranial base), CV (cervical vertebra), UAW (upper airway),
-            SKIN, and the three masks CBMASK, MANDMASK, MAXMASK. The display
-            names the old schema published ("Cranial base", ...) are accepted
-            too. A structure with no model in the bundle is reported in
-            `structures_without_model` rather than failing the run.
+            SKIN, and the three masks CBMASK, MANDMASK, MAXMASK. Only the codes
+            are published as options, but the display names the old schema used
+            ("Cranial base", ...) are still accepted, so a client that has not
+            moved keeps working. A structure with no model in the bundle is
+            reported in `structures_without_model` rather than failing the run.
         merge: MERGED for one multi-label file per scan, SEPARATE for one
             binary file per structure. Both may be given. A single-structure
             run always writes the separate form -- a "merged" volume of one
