@@ -48,11 +48,23 @@ what the server puts in a path — so keep it lowercase and stable.
 
 One public callable. Nothing else is part of the contract.
 
-**Annotations are stdlib only**: `Path`, `str`, `int`, `float`, `bool`, and
-`list[...]` of those. `Path` means "a file or a directory"; everything else is a
-scalar. No `Optional`, no unions, no custom marker types, nothing imported from
-the server. `scripts/describe.py` refuses anything else rather than publish a
-schema the client will render wrongly.
+**Annotations are stdlib only**: `Path`, `str`, `int`, `float`, `bool`,
+`Literal[...]` and `list[...]` of those. `Path` means "a file or a directory";
+everything else is a scalar. No `Optional`, no unions, no custom marker types,
+nothing imported from the server. `scripts/describe.py` refuses anything else
+rather than publish a schema the client will render wrongly.
+
+**A fixed set of options is a `Literal`.** `list[Literal["MAND", "MAX", ...]]`
+is several-of, a bare `Literal["MERGED", "SEPARATE"]` is exactly-one, and
+describe.py publishes both as `choices` so the client can render a picker.
+Saying it in the annotation is the point — the `ArgSpec.choices` tables this
+replaces were a second declaration, and they drifted. The default is checked
+against the options, so a picker can always produce the value the tool starts
+from.
+
+`Literal` is published, not enforced: the runner calls `run(**params)` from a
+JSON object, so a stale client or a direct caller can still send anything.
+Validate the value in the tool and raise on a bad one.
 
 **No default means required.** That is the only thing `required` in the schema
 comes from, so there is no second declaration to contradict the signature.
@@ -62,6 +74,12 @@ comes from, so there is no second declaration to contradict the signature.
 call, so a folder of 40 scans has to be one call, not 40. Upstream is
 inconsistent about this; standardise on batch-capable inputs. `iter_scans` in
 the template is the shape to copy.
+
+**Never unpack a `.zip`.** The server unpacks archives before `run()` is
+called, so a tool always receives a real file or directory. The upstream tools
+each carried their own extraction, zip-bomb cap and scratch directory for it;
+that is exactly the duplication the split removes, and re-adding it in a tool
+puts path resolution back on the wrong side of the line.
 
 **Heavy imports go inside `run()`**, and that covers the whole import chain, not
 just `__init__.py`. CI imports every tool on every PR to generate its schema; a

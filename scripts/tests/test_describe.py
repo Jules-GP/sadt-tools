@@ -199,6 +199,123 @@ def test_unsupported_signatures_fail_loudly(tmp_path, body, expected):
     assert result.stdout == "", "a refused tool must not emit a partial schema"
 
 
+# --- Literal: a fixed set of options ---------------------------------------
+
+
+def test_literal_publishes_choices(tmp_path):
+    """`list[Literal[...]]` is several-of, bare `Literal[...]` is exactly-one."""
+    tool = make_tool(
+        tmp_path,
+        "from typing import Literal\n\n"
+        "def run(\n"
+        "    scan: Path,\n"
+        '    structures: list[Literal["MAND", "MAX", "CB"]] = ["MAND", "MAX"],\n'
+        '    merge: Literal["MERGED", "SEPARATE"] = "MERGED",\n'
+        "    folds: list[Literal[0, 1, 2]] = [0],\n"
+        ") -> Path:\n"
+        '    """Segment a scan."""\n'
+        "    return scan\n",
+    )
+    schema = json.loads(describe(tool).stdout)
+
+    assert schema["arguments"]["structures"] == {
+        "type": "list[str]",
+        "required": False,
+        "default": ["MAND", "MAX"],
+        "choices": ["MAND", "MAX", "CB"],
+    }
+    assert schema["arguments"]["merge"] == {
+        "type": "str",
+        "required": False,
+        "default": "MERGED",
+        "choices": ["MERGED", "SEPARATE"],
+    }
+    assert schema["arguments"]["folds"]["type"] == "list[int]"
+    assert schema["arguments"]["folds"]["choices"] == [0, 1, 2]
+
+
+def test_choices_come_last_so_keys_stay_stable(tmp_path):
+    """Adding options to an argument must not reorder what a reader expects."""
+    tool = make_tool(
+        tmp_path,
+        "from typing import Literal\n\n"
+        'def run(scan: Path, mode: Literal["a", "b"] = "a") -> Path:\n'
+        '    """Do a thing."""\n'
+        "    return scan\n",
+    )
+    schema = json.loads(describe(tool).stdout)
+
+    assert list(schema["arguments"]["mode"]) == ["type", "required", "default", "choices"]
+
+
+def test_a_required_argument_may_still_carry_choices(tmp_path):
+    tool = make_tool(
+        tmp_path,
+        "from typing import Literal\n\n"
+        'def run(scan: Path, mode: Literal["a", "b"]) -> Path:\n'
+        '    """Do a thing."""\n'
+        "    return scan\n",
+    )
+    assert json.loads(describe(tool).stdout)["arguments"]["mode"] == {
+        "type": "str",
+        "required": True,
+        "choices": ["a", "b"],
+    }
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        pytest.param(
+            "from typing import Literal\n\n"
+            'def run(scan: Path, mode: Literal["a", "b"] = "c") -> Path:\n'
+            '    """Do a thing."""\n'
+            "    return scan\n",
+            "not one of its options",
+            id="a default the published picker cannot produce",
+        ),
+        pytest.param(
+            "from typing import Literal\n\n"
+            'def run(scan: Path, m: list[Literal["a", "b"]] = ["a", "z"]) -> Path:\n'
+            '    """Do a thing."""\n'
+            "    return scan\n",
+            "not one of its options",
+            id="one bad element in a multi-select default",
+        ),
+        pytest.param(
+            "from typing import Literal\n\n"
+            'def run(scan: Path, mode: Literal["a", 1] = "a") -> Path:\n'
+            '    """Do a thing."""\n'
+            "    return scan\n",
+            "must all be str, or all be int",
+            id="mixed option types have no single widget",
+        ),
+        pytest.param(
+            "from typing import Literal\n\n"
+            "def run(scan: Path, mode: Literal[True, False] = True) -> Path:\n"
+            '    """Do a thing."""\n'
+            "    return scan\n",
+            "must all be str, or all be int",
+            id="bool passes isinstance(int) and would render as a number",
+        ),
+        pytest.param(
+            "from typing import Literal, Optional\n\n"
+            'def run(scan: Path, mode: Literal[None] = None) -> Path:\n'
+            '    """Do a thing."""\n'
+            "    return scan\n",
+            "Options must be str or int",
+            id="None is not an option a client can render",
+        ),
+    ],
+)
+def test_bad_choices_fail_loudly(tmp_path, body, expected):
+    result = describe(make_tool(tmp_path, body))
+
+    assert result.returncode == 2
+    assert expected in result.stderr
+    assert result.stdout == ""
+
+
 def test_dict_of_paths_is_accepted_for_several_outputs(tmp_path):
     tool = make_tool(
         tmp_path,
@@ -239,3 +356,5 @@ def test_the_template_describes_itself(tmp_path):
     schema = json.loads(result.stdout)
     assert schema["arguments"]["scans"]["required"] is True
     assert schema["arguments"]["metrics"]["default"] == ["mean", "max"]
+    assert schema["arguments"]["metrics"]["choices"] == ["mean", "max", "min", "std"]
+    assert schema["arguments"]["reduction"]["choices"] == ["per_scan", "pooled"]

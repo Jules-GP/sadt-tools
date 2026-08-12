@@ -728,3 +728,37 @@ def test_real_models_segment_a_real_scan(tmp_path):
     merged = next((output).rglob("*_MERGED.nii.gz"))
     labels = set(np.unique(sitk.GetArrayFromImage(sitk.ReadImage(str(merged)))).tolist())
     assert labels == {0, catalog.LABELS["MAND"], catalog.LABELS["MAX"], catalog.LABELS["CB"]}
+
+
+# ---------------------------------------------------------------------------
+# the schema's published options
+# ---------------------------------------------------------------------------
+
+def _choices(argument):
+    """The options run()'s annotation publishes for one argument."""
+    import typing
+
+    hint = typing.get_type_hints(run)[argument]
+    inner = typing.get_args(hint)[0] if typing.get_origin(hint) is list else hint
+    return list(typing.get_args(inner))
+
+
+def test_published_structure_options_match_the_catalog():
+    """`Literal` takes literals only, so it cannot be built from the catalog.
+
+    That leaves two declarations of one set -- the exact drift the contract
+    exists to prevent -- so this is what keeps them honest. A structure added
+    to catalog.STRUCTURE_CODES and not to run() would be unselectable from the
+    client; the reverse would publish an option the tool rejects.
+    """
+    assert _choices("structures") == list(catalog.STRUCTURE_CODES)
+
+
+def test_published_merge_options_match_the_catalog():
+    assert _choices("merge") == list(catalog.MERGE_MODES)
+
+
+def test_every_published_structure_option_is_accepted_by_the_tool():
+    """Published, not enforced: the runner calls run(**params) from JSON."""
+    for code in _choices("structures"):
+        assert catalog.structure_codes([code]) == (code,)

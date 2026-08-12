@@ -26,7 +26,7 @@ Add the matching row to [`PROVENANCE.md`](../../PROVENANCE.md) in the same PR.
 | | |
 |---|---|
 | Inputs | `scans`: one `.npy` array or a folder of them. `output_dir`: where results go. |
-| Options | `metrics` (mean/max/min/std), `threshold`, `per_scan_report`. |
+| Options | `metrics` (several of mean/max/min/std), `reduction` (one of per_scan/pooled), `threshold`, `per_scan_report`. |
 | Outputs | `summary.txt`, one row per scan, plus `<scan>.txt` per scan on request. |
 | Model files | None. A real tool lists every weight file it expects here, and where it comes from upstream. |
 
@@ -39,7 +39,8 @@ server:
 def run(
     scans: Path,
     output_dir: Path,
-    metrics: list[str] = ["mean", "max"],
+    metrics: list[Literal["mean", "max", "min", "std"]] = ["mean", "max"],
+    reduction: Literal["per_scan", "pooled"] = "per_scan",
     threshold: float = 0.0,
     per_scan_report: bool = False,
 ) -> Path:
@@ -55,6 +56,8 @@ $ tools/_template/.venv/bin/python scripts/describe.py tools/_template
   "description": "Summarise the intensity distribution of a scan or a folder of scans.",
   "arguments": {
     "scans": {"type": "path", "required": true},
+    "metrics": {"type": "list[str]", "required": false, "default": ["mean", "max"],
+                "choices": ["mean", "max", "min", "std"]},
     ...
   },
   "returns": "path",
@@ -65,8 +68,9 @@ $ tools/_template/.venv/bin/python scripts/describe.py tools/_template
 The rules behind each line of that signature are in
 [`CONTRIBUTING.md`](../../CONTRIBUTING.md); the ones easiest to get wrong are
 that heavy imports go inside `run()`, that the absence of a default is the only
-thing making an argument required, and that a path argument must accept a folder
-so a batch is one call rather than forty.
+thing making an argument required, that a fixed set of options is a `Literal`
+rather than a second table, and that a path argument must accept a folder so a
+batch is one call rather than forty.
 
 ## Working on it
 
