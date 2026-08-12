@@ -35,6 +35,11 @@ Changes made by this port — the algorithm is untouched:
   no longer call each other.
 - **Zip extraction removed.** The server unpacks archives before `run()`.
 - **The GPU semaphore is gone** — each call is its own process now.
+- **`device` is a `Literal["cuda", "cpu"]`**, so the schema publishes both
+  options. `model` deliberately stays a plain `Path`: which bundles exist is a
+  property of the deployment, not of this package, so the picker comes from the
+  server's data listing rather than from a hard-coded set here that would go
+  stale the moment a bundle is not staged.
 - **`device` and `tile_step_size` are arguments**, not server settings.
   `run()` must not read the environment, and `tile_step_size` moves the
   segmentation. `BATCHDENTALSEG_MAX_GPU_JOBS` went with the semaphore.
