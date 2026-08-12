@@ -1,0 +1,42 @@
+[project]
+name = "sadt-surgmovpred"
+version = "0.1.0"
+description = "Predict post-surgical skeletal movements from cephalometric measurements."
+# scikit-learn 1.7 supports 3.10 through 3.13. 3.12 is what the port was
+# validated on; see README for the 3.10 cross-check.
+requires-python = ">=3.12,<3.13"
+# Every version here is the one the currently deployed server runs, because
+# that is the environment the reference predictions in README were produced in.
+# The models are stacking regressors pickled under scikit-learn 1.6.1 and loaded
+# under 1.7.2 -- that mismatch is upstream's own design (it silences
+# InconsistentVersionWarning), not something to "fix" by moving a pin.
+dependencies = [
+    "numpy==2.2.6",
+    "pandas==2.3.3",
+    "scikit-learn==1.7.2",
+    "joblib==1.5.3",
+    # Not optional and easy to miss: the stacking regressors hold LGBMRegressor
+    # sub-estimators, so joblib.load fails outright without it.
+    "lightgbm==4.7.0",
+    # pandas reads .xlsx through openpyxl and .ods through odfpy; neither is
+    # pulled in by pandas itself.
+    "openpyxl==3.1.5",
+    "odfpy==1.4.1",
+]
+
+[dependency-groups]
+dev = ["pytest==8.3.4"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_surgmovpred"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+    "models: needs the real model packages and is skipped without them. See tests/data/README.md.",
+]

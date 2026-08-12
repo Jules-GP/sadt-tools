@@ -1,19 +1,14 @@
-"""Unit tests for SurgMovPredLogic.py -- exercises the tool's own logic
-directly (column cleaning, ID detection, model loading, prediction,
-saving), independently of the HTTP layer.
+"""End-to-end tests for SurgMovPred.
 
-Run just this module's tests:
-    cd server && ./venv/bin/pytest tools/SurgMovPred/test/
-Or as part of the full suite:
-    cd server && ./venv/bin/pytest
+The models are built here from scikit-learn rather than committed: the shipped
+packages are 1.4 GB and the reference input is patient data, so neither can go
+into git. `test_real_models_*` runs against the real ones when
+`SADT_SURGMOVPRED_MODELS` and `SADT_SURGMOVPRED_INPUT` point at them, and is
+skipped otherwise -- see tests/data/README.md.
 """
 
 import os
-import zipfile
-
-# Set before anything imports config.Settings() (file_utils does, via the
-# tool logic), so the suite runs regardless of the local environment.
-os.environ.setdefault("API_TOKEN", "test-token")
+from pathlib import Path
 
 import joblib
 import pandas as pd
@@ -21,19 +16,134 @@ import pytest
 from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import StandardScaler
 
-from tools.SurgMovPred.src.SurgMovPredLogic import (
-    LoadData,
-    SurgMovPred,
+from sadt_surgmovpred import run
+from sadt_surgmovpred.pipeline import (
     clean_name,
     find_id_column,
+    load_measurements,
+    load_model_packages,
     predict_all_targets,
     save_results,
 )
 
 
-# ---------------------------------------------------------------------------
-# clean_name
-# ---------------------------------------------------------------------------
+def make_model(folder: Path, target_name: str, feature: str = "f1"):
+    """A one-feature stacking package with the shape the real ones have."""
+    # Fitted on a named frame, like the real packages: a scaler fitted on a bare
+    # array warns on every transform and buries anything else in the log.
+    training = pd.DataFrame({feature: [0, 10, 20]})
+    scaler = StandardScaler().fit(training)
+    scaled = pd.DataFrame(scaler.transform(training), columns=training.columns)
+    model = LinearRegression().fit(scaled, [5, 15, 25])
+    package = {
+        "target_name": target_name,
+        "features_names": [feature],
+        "scaler": scaler,
+        "model": model,
+    }
+    target_dir = folder / target_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(package, target_dir / "stacking_package.pkl")
+    return folder
+
+
+@pytest.fixture
+def model(tmp_path):
+    return make_model(tmp_path / "models", "f1_Pred")
+
+
+@pytest.fixture
+def measurements(tmp_path):
+    table = tmp_path / "patients.xlsx"
+    pd.DataFrame({"PatientID": [1, 2, 3], "f1": [0, 10, 20]}).to_excel(table, index=False)
+    return table
+
+
+# --- run() -----------------------------------------------------------------
+
+
+def test_run_writes_both_tables(model, measurements, tmp_path):
+    outputs = run(measurements=measurements, model=model, output_dir=tmp_path / "out")
+
+    assert set(outputs) == {"excel", "csv"}
+    assert all(path.exists() and path.stat().st_size > 0 for path in outputs.values())
+
+    results = pd.read_excel(outputs["excel"], index_col=0)
+    assert list(results.columns) == ["IDPatient", "f1_Pred"]
+    assert list(results["IDPatient"]) == [1, 2, 3]
+    # The fitted line maps 0/10/20 onto 5/15/25.
+    assert results["f1_Pred"].round(6).tolist() == [5.0, 15.0, 25.0]
+
+    csv_results = pd.read_csv(outputs["csv"], index_col=0)
+    assert csv_results.shape == results.shape
+
+
+def test_run_accepts_a_folder_of_tables(model, tmp_path):
+    """The batch form: one call for a folder, not one call per file."""
+    folder = tmp_path / "batch"
+    folder.mkdir()
+    pd.DataFrame({"PatientID": [1, 2], "f1": [0, 10]}).to_csv(folder / "a.csv", index=False)
+    pd.DataFrame({"PatientID": [3], "f1": [20]}).to_csv(folder / "b.csv", index=False)
+
+    outputs = run(measurements=folder, model=model, output_dir=tmp_path / "out")
+
+    results = pd.read_excel(outputs["excel"], index_col=0)
+    assert list(results["IDPatient"]) == [1, 2, 3], "sorted, so a batch is reproducible"
+
+
+def test_run_writes_nothing_outside_the_output_directory(model, measurements, tmp_path):
+    before = {path: path.stat().st_mtime_ns for path in tmp_path.rglob("*") if path.is_file()}
+
+    run(measurements=measurements, model=model, output_dir=tmp_path / "out")
+
+    untouched = {
+        path: mtime for path, mtime in before.items() if not path.is_relative_to(tmp_path / "out")
+    }
+    assert all(path.stat().st_mtime_ns == mtime for path, mtime in untouched.items())
+    assert {path.name for path in (tmp_path / "out").iterdir()} == {
+        "predictions_outputs.xlsx",
+        "predictions_outputs.csv",
+    }
+
+
+def test_run_without_an_id_column_leaves_the_identifier_blank(model, tmp_path):
+    table = tmp_path / "anonymous.csv"
+    pd.DataFrame({"f1": [0, 10]}).to_csv(table, index=False)
+
+    outputs = run(measurements=table, model=model, output_dir=tmp_path / "out")
+
+    results = pd.read_csv(outputs["csv"], index_col=0)
+    assert results["IDPatient"].isna().all()
+    assert results["f1_Pred"].notna().all(), "predictions still happen without an ID"
+
+
+def test_a_model_whose_features_are_absent_is_skipped_not_fatal(tmp_path, measurements):
+    """A thinner input table yields fewer targets, never an error."""
+    models = make_model(tmp_path / "models", "f1_Pred")
+    make_model(models, "other_Pred", feature="not_in_the_input")
+
+    outputs = run(measurements=measurements, model=models, output_dir=tmp_path / "out")
+
+    results = pd.read_csv(outputs["csv"], index_col=0)
+    assert "f1_Pred" in results.columns
+    assert "other_Pred" not in results.columns
+
+
+def test_missing_inputs_are_reported_clearly(model, tmp_path, measurements):
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        run(measurements=tmp_path / "nope.csv", model=model, output_dir=tmp_path / "out")
+
+    empty = tmp_path / "empty_models"
+    empty.mkdir()
+    with pytest.raises(FileNotFoundError, match="stacking_package.pkl"):
+        run(measurements=measurements, model=empty, output_dir=tmp_path / "out")
+
+    with pytest.raises(FileNotFoundError, match="not a folder"):
+        run(measurements=measurements, model=measurements, output_dir=tmp_path / "out")
+
+
+# --- the ported pieces, unchanged from upstream ----------------------------
+
 
 @pytest.mark.parametrize(
     "raw, expected",
@@ -51,10 +161,6 @@ def test_clean_name(raw, expected):
     assert clean_name(raw) == expected
 
 
-# ---------------------------------------------------------------------------
-# find_id_column
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize(
     "columns, expected",
     [
@@ -71,211 +177,78 @@ def test_find_id_column(columns, expected):
     assert find_id_column(columns) == expected
 
 
-# ---------------------------------------------------------------------------
-# LoadData.extract_model
-# ---------------------------------------------------------------------------
+def test_features_are_matched_without_their_T0_suffix():
+    """Some files carry T0 measurements without the '_T0' training-time suffix."""
+    training = pd.DataFrame({"f1_T0": [0, 10, 20]})
+    scaler = StandardScaler().fit(training)
+    scaled = pd.DataFrame(scaler.transform(training), columns=training.columns)
+    model = LinearRegression().fit(scaled, [0, 100, 200])
+    packages = {"target_a": {"features_names": ["f1_T0"], "scaler": scaler, "model": model}}
 
-def _make_model_zip(tmp_path, package: dict, target_folder: str = "SomeTarget_Pred") -> str:
-    model_dir = tmp_path / "model_src" / target_folder
-    model_dir.mkdir(parents=True)
-    joblib.dump(package, model_dir / "stacking_package.pkl")
+    results = predict_all_targets(pd.DataFrame({"f1": [0, 10, 20]}), packages)
 
-    zip_path = tmp_path / "model.zip"
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.write(model_dir / "stacking_package.pkl", f"{target_folder}/stacking_package.pkl")
-    return str(zip_path)
+    assert results["target_a"].round(6).tolist() == [0.0, 100.0, 200.0]
 
 
-def test_extract_model_loads_valid_package(tmp_path):
-    package = {
-        "target_name": "SomeTarget_Pred",
-        "features_names": ["f1"],
-        "scaler": StandardScaler(),
-        "model": LinearRegression(),
-    }
-    zip_path = _make_model_zip(tmp_path, package)
+def test_load_model_packages_walks_nested_folders(tmp_path):
+    make_model(tmp_path / "models" / "nested" / "deeper", "a_Pred")
+    make_model(tmp_path / "models", "b_Pred")
 
-    packages = LoadData.extract_model(zip_path)
+    packages = load_model_packages(tmp_path / "models")
 
-    assert list(packages.keys()) == ["SomeTarget_Pred"]
-    assert packages["SomeTarget_Pred"]["target_name"] == "SomeTarget_Pred"
+    assert sorted(packages) == ["a_Pred", "b_Pred"]
 
 
-def test_extract_model_loads_from_folder(tmp_path):
-    """A model served directly from the data store is a plain folder: it must
-    be loaded as-is, without any zip extraction step."""
-    package = {
-        "target_name": "SomeTarget_Pred",
-        "features_names": ["f1"],
-        "scaler": StandardScaler(),
-        "model": LinearRegression(),
-    }
-    model_dir = tmp_path / "SomeTarget_Pred"
-    model_dir.mkdir()
-    joblib.dump(package, model_dir / "stacking_package.pkl")
+def test_load_measurements_reads_every_supported_format(tmp_path):
+    frame = pd.DataFrame({"PatientID": [1, 2], "f1": [10, 20]})
+    frame.to_csv(tmp_path / "a.csv", index=False)
+    frame.to_excel(tmp_path / "a.xlsx", index=False)
+    frame.to_excel(tmp_path / "a.ods", engine="odf", index=False)
 
-    packages = LoadData.extract_model(str(model_dir))
+    for suffix in ("csv", "xlsx", "ods"):
+        loaded = load_measurements(tmp_path / f"a.{suffix}")
+        assert list(loaded.columns) == ["PatientID", "f1"], suffix
+        assert len(loaded) == 2, suffix
 
-    assert list(packages.keys()) == ["SomeTarget_Pred"]
-
-
-def test_extract_model_raises_when_no_package_found(tmp_path):
-    zip_path = tmp_path / "empty.zip"
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.writestr("readme.txt", "nothing here")
-
-    with pytest.raises(FileNotFoundError):
-        LoadData.extract_model(str(zip_path))
-
-
-# ---------------------------------------------------------------------------
-# LoadData.load_input
-# ---------------------------------------------------------------------------
-
-def _make_input_zip(tmp_path, df: pd.DataFrame, zip_name: str = "input.zip") -> str:
-    input_dir = tmp_path / "input_src"
-    input_dir.mkdir(exist_ok=True)
-    csv_path = input_dir / "data.csv"
-    df.to_csv(csv_path, index=False)
-
-    zip_path = tmp_path / zip_name
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.write(csv_path, "data.csv")
-    return str(zip_path)
-
-
-def test_load_input_reads_csv_from_zip(tmp_path):
-    df = pd.DataFrame({"PatientID": [1, 2], "f1": [10, 20]})
-    zip_path = _make_input_zip(tmp_path, df)
-
-    loaded = LoadData.load_input(zip_path)
-
-    assert list(loaded.columns) == ["PatientID", "f1"]
-    assert len(loaded) == 2
-
-
-def test_load_input_reads_bare_tabular_file(tmp_path):
-    """A server-side test file may be a single CSV/XLSX/ODS, not a zip."""
-    df = pd.DataFrame({"PatientID": [1, 2], "f1": [10, 20]})
-    xlsx_path = tmp_path / "patients.xlsx"
-    df.to_excel(xlsx_path, index=False)
-
-    loaded = LoadData.load_input(str(xlsx_path))
-
-    assert list(loaded.columns) == ["PatientID", "f1"]
-    assert len(loaded) == 2
-
-
-# ---------------------------------------------------------------------------
-# predict_all_targets
-# ---------------------------------------------------------------------------
-
-def test_predict_all_targets_happy_path():
-    scaler = StandardScaler().fit([[0], [10], [20]])
-    model = LinearRegression().fit(scaler.transform([[0], [10], [20]]), [0, 100, 200])
-    packages = {
-        "target_a": {"features_names": ["f1"], "scaler": scaler, "model": model},
-    }
-    df = pd.DataFrame({"f1": [0, 10, 20]})
-
-    results = predict_all_targets(df, packages)
-
-    assert "target_a" in results.columns
-    assert len(results) == 3
-
-
-def test_predict_all_targets_skips_target_with_missing_features():
-    scaler = StandardScaler().fit([[0], [10]])
-    model = LinearRegression().fit(scaler.transform([[0], [10]]), [0, 1])
-    packages = {
-        "target_missing": {"features_names": ["does_not_exist"], "scaler": scaler, "model": model},
-    }
-    df = pd.DataFrame({"f1": [1, 2, 3]})
-
-    results = predict_all_targets(df, packages)
-
-    assert "target_missing" not in results.columns
-
-
-# ---------------------------------------------------------------------------
-# save_results
-# ---------------------------------------------------------------------------
 
 def test_save_results_writes_excel_and_csv(tmp_path):
-    df = pd.DataFrame({"IDPatient": [1, 2], "target_a": [10.0, 20.0]})
+    outputs = save_results(pd.DataFrame({"IDPatient": [1], "target_a": [10.0]}), tmp_path / "out")
 
-    excel_path = save_results(df, str(tmp_path / "out"))
-
-    assert os.path.exists(excel_path)
-    assert excel_path.endswith(".xlsx")
-    assert os.path.exists(str(tmp_path / "out" / "predictions_outputs.csv"))
+    assert outputs["excel"].suffix == ".xlsx" and outputs["excel"].exists()
+    assert outputs["csv"].suffix == ".csv" and outputs["csv"].exists()
 
 
-# ---------------------------------------------------------------------------
-# SurgMovPred.main -- full pipeline, model.zip + input.zip -> result file
-# ---------------------------------------------------------------------------
+# --- the real models -------------------------------------------------------
 
-def test_main_full_pipeline(tmp_path):
-    scaler = StandardScaler().fit([[0], [10], [20]])
-    model = LinearRegression().fit(scaler.transform([[0], [10], [20]]), [5, 15, 25])
-    package = {
-        "target_name": "f1_Pred",
-        "features_names": ["f1"],
-        "scaler": scaler,
-        "model": model,
-    }
-    model_zip = _make_model_zip(tmp_path, package, target_folder="f1_Pred")
-
-    df = pd.DataFrame({"PatientID": [1, 2, 3], "f1": [0, 10, 20]})
-    input_zip = _make_input_zip(tmp_path, df)
-
-    output_path = SurgMovPred.main(model_zip, input_zip)
-
-    assert os.path.exists(output_path)
-    result_df = pd.read_excel(output_path, index_col=0)
-    assert "IDPatient" in result_df.columns
-    assert "f1_Pred" in result_df.columns
-    assert list(result_df["IDPatient"]) == [1, 2, 3]
+REAL_MODELS = os.environ.get("SADT_SURGMOVPRED_MODELS")
+REAL_INPUT = os.environ.get("SADT_SURGMOVPRED_INPUT")
 
 
-def test_main_full_pipeline_with_server_side_data(tmp_path, monkeypatch):
-    """Data-store layout: the model is a plain folder and the input a bare
-    XLSX, both served read-only -- nothing is zipped, and the output must land
-    outside the (read-only) input directory."""
-    from config import settings
+@pytest.mark.models
+@pytest.mark.skipif(
+    not (REAL_MODELS and REAL_INPUT),
+    reason="set SADT_SURGMOVPRED_MODELS and SADT_SURGMOVPRED_INPUT (see tests/data/README.md)",
+)
+def test_real_models_predict_every_target(tmp_path):
+    """The shipped packages, on the reference input, in one call.
 
-    monkeypatch.setattr(settings, "TEMP_DIR", str(tmp_path / "server_tmp"))
+    Numbers are checked against the pre-port implementation separately (see
+    README, "Validated against"); what this asserts is that nothing about the
+    real packages -- LightGBM sub-estimators, 145-feature models, the '#' ID
+    column -- trips over the repackaging.
+    """
+    import numpy as np
 
-    scaler = StandardScaler().fit([[0], [10], [20]])
-    model = LinearRegression().fit(scaler.transform([[0], [10], [20]]), [5, 15, 25])
-    package = {
-        "target_name": "f1_Pred",
-        "features_names": ["f1"],
-        "scaler": scaler,
-        "model": model,
-    }
-    model_dir = tmp_path / "DATA" / "models" / "f1_Pred"
-    model_dir.mkdir(parents=True)
-    joblib.dump(package, model_dir / "stacking_package.pkl")
-
-    testfiles_dir = tmp_path / "DATA" / "testfiles"
-    testfiles_dir.mkdir()
-    input_path = testfiles_dir / "patients.xlsx"
-    pd.DataFrame({"PatientID": [1, 2, 3], "f1": [0, 10, 20]}).to_excel(
-        input_path, index=False
+    outputs = run(
+        measurements=Path(REAL_INPUT),
+        model=Path(REAL_MODELS),
+        output_dir=tmp_path / "out",
     )
 
-    # Simulate the read-only DATA mount so the tool has to fall back to its
-    # TEMP_DIR scratch dir. When running as root (e.g. in the Docker test
-    # container) the chmod has no effect and the scratch simply lands next to
-    # the input; the assertions hold either way.
-    testfiles_dir.chmod(0o555)
-    try:
-        output_path = SurgMovPred.main(str(model_dir), str(input_path))
+    results = pd.read_csv(outputs["csv"], index_col=0)
+    predictions = results.drop(columns="IDPatient")
 
-        assert os.path.exists(output_path)
-        result_df = pd.read_excel(output_path, index_col=0)
-        assert "f1_Pred" in result_df.columns
-        assert list(result_df["IDPatient"]) == [1, 2, 3]
-    finally:
-        testfiles_dir.chmod(0o755)
+    assert len(results) == 101
+    assert len(predictions.columns) == 112, "every shipped model produced a column"
+    assert results["IDPatient"].notna().all()
+    assert np.isfinite(predictions.to_numpy(dtype=float)).all()

@@ -1,40 +1,27 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+"""Surgical movement prediction: one stacking regressor per target measurement.
 
-import sys
-import os
-import re
-import tempfile
-import warnings
-from pathlib import Path
+Ported from the server-side tool with the algorithm untouched -- `clean_name`,
+`find_id_column` and `predict_all_targets` are the upstream code. What is gone
+is the plumbing the tool no longer owns: zip extraction, scratch directories and
+`file_utils`. The server unpacks archives before `run()` is called and hands it
+an output directory, so none of that belongs here any more.
+
+`load_tabular_file` and `load_tabular_directory` are copied from the server's
+`file_utils.py` rather than shared: see CONTRIBUTING.md on why there is no
+sadt-core package.
+"""
+
 import logging
-import pandas as pd
-import joblib
+import re
+from pathlib import Path
 
-import file_utils
+# No handler and no level: a library that configures logging steals the
+# decision from whatever runs it. The runner owns the handlers.
+logger = logging.getLogger(__name__)
 
-# The deployed sklearn version commonly differs from the one used to train the models.
-# This is expected (models are tested for compatibility before being shipped) and not
-# an actual error, so it shouldn't be surfaced as a CLI failure.
-try:
-    from sklearn.exceptions import InconsistentVersionWarning
-    warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
-except ImportError:
-    pass
+TABULAR_SUFFIXES = (".csv", ".xlsx", ".ods")
 
-# ===== Logging Configuration =====
-logger = logging.getLogger("SurgMovPred")
-logger.setLevel(logging.INFO)
-logger.propagate = False
-if logger.handlers:
-    logger.handlers.clear()
-console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s')
-console_handler.setFormatter(formatter)
-logger.addHandler(console_handler)
-
-logger.info("SurgMovPredLogic initialization")
+MODEL_FILENAME = "stacking_package.pkl"
 
 
 def clean_name(name: str) -> str:
@@ -103,86 +90,107 @@ def find_id_column(columns) -> str:
     return None
 
 
-class LoadData:
-    """Extracts the model package and loads the input data used by SurgMovPred.
+def silence_sklearn_version_warning():
+    """The shipped models are loaded by a different sklearn than trained them.
 
-    Zip extraction and CSV/XLSX/ODS loading are generic concerns, factored out
-    into file_utils.py so other tools can reuse them; only the
-    "find stacking_package.pkl inside the extracted model" part is specific
-    to this tool and stays here.
+    That is expected -- compatibility is checked before a model ships -- so the
+    warning is noise here, not a failure. It is silenced inside the pipeline
+    rather than at import time so that importing this module stays free of
+    sklearn.
     """
+    import warnings
 
-    @staticmethod
-    def extract_model(model_path: str, scratch_dir: str = None) -> dict:
-        """Loads every 'stacking_package.pkl' found under `model_path`.
+    try:
+        from sklearn.exceptions import InconsistentVersionWarning
+        warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+    except ImportError:
+        pass
 
-        `model_path` is either a model folder served directly from the data
-        store (no archive step, the usual case) or a zip archive that first
-        needs extracting (e.g. a legacy packaged model). A zip is extracted
-        into `scratch_dir` when given (the model itself may live in the
-        read-only data store), next to the archive otherwise.
-        """
-        if os.path.isdir(model_path):
-            logger.info(f"Loading model package from folder: {model_path}")
-            return LoadData._load_model_packages(model_path)
 
-        logger.info(f"Extracting model package: {model_path}")
-        base_dir = scratch_dir or os.path.dirname(model_path)
-        extract_dir = file_utils.extract_zip(
-            model_path, os.path.join(base_dir, "model_extracted")
+def load_tabular_file(path: Path):
+    """Load a single CSV, XLSX, or ODS file into a DataFrame."""
+    import pandas as pd
+
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    if suffix == ".xlsx":
+        return pd.read_excel(path)
+    if suffix == ".ods":
+        return pd.read_excel(path, engine="odf")
+    raise ValueError(f"Unsupported file extension '{suffix}' for tabular file: {path}")
+
+
+def load_measurements(measurements: Path):
+    """One table, or a folder of them concatenated into a batch.
+
+    A folder is the batch form: the server pays a process start-up cost per
+    call, so 40 clinics' spreadsheets have to arrive as one call. Sorted,
+    because readdir order varies between filesystems and an unsorted
+    concatenation renumbers every row between two runs on the same folder.
+    """
+    if measurements.is_dir():
+        import pandas as pd
+
+        files = sorted(
+            path
+            for path in measurements.iterdir()
+            if path.is_file() and path.suffix.lower() in TABULAR_SUFFIXES
         )
-        return LoadData._load_model_packages(extract_dir)
-
-    @staticmethod
-    def _load_model_packages(base_model_folder: str) -> dict:
-        """Recursively walks the extracted model folder to load every 'stacking_package.pkl' file."""
-        packages = {}
-        package_files = list(Path(base_model_folder).glob("**/stacking_package.pkl"))
-
-        if not package_files:
-            raise FileNotFoundError(f"No 'stacking_package.pkl' model package found in {base_model_folder}")
-
-        logger.info(f"Loading {len(package_files)} model(s)...")
-        for pkl_path in package_files:
-            try:
-                package = joblib.load(pkl_path)
-                packages[package['target_name']] = package
-            except Exception:
-                logger.exception(f"Unable to load package {pkl_path}")
-
-        if not packages:
-            raise RuntimeError(f"None of the {len(package_files)} model package(s) found in {base_model_folder} could be loaded.")
-
-        logger.info(f"Successfully loaded {len(packages)} model package(s).")
-        return packages
-
-    @staticmethod
-    def load_input(input_path: str, scratch_dir: str = None) -> pd.DataFrame:
-        """Loads the input data: a zip archive of CSV/XLSX/ODS files, a folder
-        of such files (e.g. served from the data store), or a single file.
-
-        A zip is extracted into `scratch_dir` when given (the input may live
-        in the read-only data store), next to the archive otherwise.
-        """
-        logger.info(f"Loading input data: {input_path}")
-        if os.path.isdir(input_path):
-            df = file_utils.load_tabular_directory(input_path)
-        elif input_path.lower().endswith(".zip"):
-            base_dir = scratch_dir or os.path.dirname(input_path)
-            extract_dir = file_utils.extract_zip(
-                input_path, os.path.join(base_dir, "input_extracted")
+        if not files:
+            raise FileNotFoundError(
+                f"No CSV, XLSX or ODS file found in: {measurements}"
             )
-            df = file_utils.load_tabular_directory(extract_dir)
-        else:
-            df = file_utils.load_tabular_file(input_path)
-        logger.info(f"Input data loaded: {len(df)} rows")
-        return df
+        logger.info(f"Loading {len(files)} table(s) from {measurements}")
+        return pd.concat([load_tabular_file(path) for path in files], ignore_index=True)
+
+    if not measurements.is_file():
+        raise FileNotFoundError(f"Input path does not exist: {measurements}")
+    return load_tabular_file(measurements)
 
 
-def predict_all_targets(df: pd.DataFrame, packages: dict) -> pd.DataFrame:
+def load_model_packages(model: Path) -> dict:
+    """Load every `stacking_package.pkl` under the model folder, keyed by target.
+
+    One folder per predicted measurement, each holding one package of
+    {target_name, features_names, scaler, model}.
+    """
+    import joblib
+
+    if not model.is_dir():
+        raise FileNotFoundError(f"Model path is not a folder: {model}")
+
+    package_files = sorted(model.glob(f"**/{MODEL_FILENAME}"))
+    if not package_files:
+        raise FileNotFoundError(f"No '{MODEL_FILENAME}' model package found in {model}")
+
+    logger.info(f"Loading {len(package_files)} model(s)...")
+    packages = {}
+    for pkl_path in package_files:
+        try:
+            package = joblib.load(pkl_path)
+            packages[package['target_name']] = package
+        except Exception:
+            # One unreadable package must not lose the other 111: it is logged
+            # and the run continues, exactly as upstream.
+            logger.exception(f"Unable to load package {pkl_path}")
+
+    if not packages:
+        raise RuntimeError(
+            f"None of the {len(package_files)} model package(s) found in {model} "
+            "could be loaded."
+        )
+
+    logger.info(f"Successfully loaded {len(packages)} model package(s).")
+    return packages
+
+
+def predict_all_targets(df, packages: dict):
     """
     Predicts the values for each loaded model, dynamically adapting to the input data.
     """
+    import pandas as pd
+
     try:
         # 1. Clean the input file's column names so they match the training-time format
         df_cleaned = df.copy()
@@ -241,73 +249,47 @@ def predict_all_targets(df: pd.DataFrame, packages: dict) -> pd.DataFrame:
         raise
 
 
-def save_results(df: pd.DataFrame, output_folder: str) -> str:
-    """Saves the predictions table as Excel and CSV. Returns the Excel file path."""
-    out_path = Path(output_folder)
-    out_path.mkdir(parents=True, exist_ok=True)
+def save_results(df, output_dir: Path) -> dict:
+    """Write the predictions table as both Excel and CSV."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    excel_output = output_dir / "predictions_outputs.xlsx"
+    csv_output = output_dir / "predictions_outputs.csv"
 
-    excel_output = out_path / "predictions_outputs.xlsx"
-    csv_output = out_path / "predictions_outputs.csv"
-
-    logger.info(f"Saving results to: {out_path}")
+    logger.info(f"Saving results to: {output_dir}")
     df.to_excel(excel_output, index=True)
     df.to_csv(csv_output, index=True)
 
     logger.info("Results saved successfully!")
-    return str(excel_output)
+    return {"excel": excel_output, "csv": csv_output}
 
 
+def predict(measurements: Path, model: Path, output_dir: Path) -> dict:
+    import pandas as pd
 
-class SurgMovPred:
-    @staticmethod
-    def main(model: str, input: str) -> str:
-        try:
-            logger.info("=== Surgical Movements Prediction Engine (Stacking Deploy) ===")
+    silence_sklearn_version_warning()
+    logger.info("=== Surgical Movements Prediction Engine (Stacking Deploy) ===")
 
-            # Scratch space for extraction and outputs. Preferably a subfolder
-            # of the request's upload work dir (cleaned up by main.py with the
-            # rest of that directory); when every input was served straight
-            # from the read-only data store that dir isn't writable, so fall
-            # back to a fresh TEMP_DIR folder (also cleaned up by main.py --
-            # see file_utils.make_scratch_dir). Writability is probed by
-            # actually creating the folder: os.access() is not reliable for
-            # read-only mounts when running as root.
-            try:
-                scratch_dir = tempfile.mkdtemp(prefix="run_", dir=os.path.dirname(input))
-            except OSError:
-                scratch_dir = file_utils.make_scratch_dir("SurgMovPred_")
+    packages = load_model_packages(model)
 
-            # 1. Load every model package (a folder served from the data store,
-            # or a zip archive to extract first)
-            packages = LoadData.extract_model(model, scratch_dir)
+    df_input = load_measurements(measurements)
+    logger.info(f"Input data loaded: {len(df_input)} rows")
 
-            # 2. Load the input data (zip archive, folder, or single CSV / Excel / ODS file)
-            df_input = LoadData.load_input(input, scratch_dir)
+    # Recover the patient identifier from the input so it can be carried over to
+    # the output: a table of 101 unlabelled prediction rows is unusable.
+    id_column = find_id_column(df_input.columns)
+    if id_column is not None:
+        logger.info(f"Detected patient ID column: '{id_column}'")
+        id_values = df_input[id_column].reset_index(drop=True)
+    else:
+        logger.warning(
+            "Could not detect a patient ID column in the input data; 'IDPatient' "
+            "will be left empty in the output."
+        )
+        id_values = pd.Series([pd.NA] * len(df_input))
 
-            # 3. Recover the patient identifier from the input so it can be carried over to the output
-            id_column = find_id_column(df_input.columns)
-            if id_column is not None:
-                logger.info(f"Detected patient ID column: '{id_column}'")
-                id_values = df_input[id_column].reset_index(drop=True)
-            else:
-                logger.warning("Could not detect a patient ID column in the input data; 'IDPatient' will be left empty in the output.")
-                id_values = pd.Series([pd.NA] * len(df_input))
+    df_results = predict_all_targets(df_input, packages)
+    df_results.insert(0, 'IDPatient', id_values.values)
 
-            # 4. Predict every target
-            df_results = predict_all_targets(df_input, packages)
-            df_results.insert(0, 'IDPatient', id_values.values)
-
-            # 5. Save into the scratch dir chosen above; main.py schedules its
-            # containing directory for cleanup after the response is streamed,
-            # so the output is removed automatically without its own hook.
-            output_dir = os.path.join(scratch_dir, "output")
-            output_path = save_results(df_results, output_dir)
-
-            logger.info("=== Process completed successfully ===")
-            return output_path
-
-        except Exception:
-            # Each step above already logs its own exception with a full traceback;
-            # re-raise so the tool server can report a clean failure.
-            logger.exception("Process failed")
-            raise
+    outputs = save_results(df_results, output_dir)
+    logger.info("=== Process completed successfully ===")
+    return outputs
