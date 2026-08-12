@@ -1,0 +1,39 @@
+[project]
+name = "sadt-template"
+version = "0.1.0"
+description = "Reference package showing the run() contract every sadt-tools tool follows."
+# Accurate, not aspirational: numpy 1.26.4 publishes no wheel past 3.12, and an
+# open-ended ">=3.11" makes uv pick 3.14 and spend a quarter-hour building it
+# from source -- or fail. Bound `requires-python` by what the pins support.
+requires-python = ">=3.11,<3.13"
+# Pin what the port actually used. A tool's dependencies are a scientific
+# decision: bumping torch/monai/numpy can change model outputs, so a bump means
+# revalidating against reference data, not just a green test run.
+dependencies = ["numpy==1.26.4"]
+
+[dependency-groups]
+dev = ["pytest==8.3.4"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_template"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+]
+
+# A tool needing a CUDA-variant wheel declares its own index, and `explicit`
+# is load-bearing: without it uv looks for EVERY package on that index.
+#
+# [[tool.uv.index]]
+# name = "pytorch-cu118"
+# url = "https://download.pytorch.org/whl/cu118"
+# explicit = true
+#
+# [tool.uv.sources]
+# torch = { index = "pytorch-cu118" }

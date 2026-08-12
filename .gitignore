@@ -1,0 +1,13 @@
+# Per-tool environments. `uv.lock` is committed, `.venv/` never is: it is tens
+# of gigabytes of CUDA wheels and it is rebuilt from the lock in one command.
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Test fixtures are fetched by tests/data/download.sh, not committed. No large
+# binaries, and no patient data, ever.
+tools/*/tests/data/*
+!tools/*/tests/data/download.sh
+!tools/*/tests/data/*.sha256

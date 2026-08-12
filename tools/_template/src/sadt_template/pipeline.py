@@ -1,0 +1,89 @@
+"""The actual work, kept out of __init__.py so that run() reads as a contract.
+
+Real tools put the ported upstream pipeline here (one module per stage if it is
+large). Two things in this file are worth copying verbatim into a new tool:
+`iter_scans`, which is how a batch-capable argument is expanded, and the lazy
+import inside `summarise`.
+"""
+
+from pathlib import Path
+
+SUFFIX = ".npy"
+
+METRICS = {
+    "mean": lambda np, values: float(np.mean(values)),
+    "max": lambda np, values: float(np.max(values)),
+    "min": lambda np, values: float(np.min(values)),
+    "std": lambda np, values: float(np.std(values)),
+}
+
+
+class ToolInputError(ValueError):
+    """An input the tool cannot work with, phrased for whoever sent it.
+
+    The runner turns this into a 422 for the client. Anything else surfaces as
+    an internal error, so raise this for bad inputs and let genuine bugs crash.
+    """
+
+
+def iter_scans(scans: Path) -> list[Path]:
+    """Expand a batch argument into the files to process, in a stable order.
+
+    Copied into every tool rather than shared: see CONTRIBUTING.md on why there
+    is no sadt-core package. Sorting matters -- readdir order varies between
+    filesystems, and an unordered batch makes two runs on the same folder
+    produce differently ordered reports.
+    """
+    if scans.is_dir():
+        found = sorted(p for p in scans.rglob(f"*{SUFFIX}") if p.is_file())
+        if not found:
+            raise ToolInputError(f"No {SUFFIX} file found under {scans}.")
+        return found
+    if scans.is_file():
+        return [scans]
+    raise ToolInputError(f"Input path does not exist: {scans}")
+
+
+def summarise(
+    scans: Path,
+    output_dir: Path,
+    metrics: list[str],
+    threshold: float,
+    per_scan_report: bool,
+) -> Path:
+    import numpy as np
+
+    unknown = [name for name in metrics if name not in METRICS]
+    if unknown:
+        raise ToolInputError(
+            f"Unknown metric(s): {', '.join(unknown)}. Available: {', '.join(METRICS)}."
+        )
+    if not metrics:
+        raise ToolInputError("Select at least one metric.")
+
+    # Created here, not by the caller: a tool that assumes its output directory
+    # already exists fails the first time it is run outside the server.
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+    for scan in iter_scans(scans):
+        values = np.load(scan).ravel()
+        kept = values[values > threshold]
+        row = {"scan": scan.name, "voxels": int(kept.size)}
+        # An empty selection would make np.mean warn and return nan; report the
+        # count and skip the statistics instead of writing nan into a result.
+        row.update(
+            {name: METRICS[name](np, kept) for name in metrics} if kept.size else {}
+        )
+        rows.append(row)
+
+        if per_scan_report:
+            (output_dir / f"{scan.stem}.txt").write_text(_format(row), encoding="utf-8")
+
+    summary = output_dir / "summary.txt"
+    summary.write_text("\n".join(_format(row) for row in rows) + "\n", encoding="utf-8")
+    return summary
+
+
+def _format(row: dict) -> str:
+    return " ".join(f"{key}={value}" for key, value in row.items())
