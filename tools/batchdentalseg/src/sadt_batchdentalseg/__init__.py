@@ -5,6 +5,7 @@ The pipeline is in pipeline.py; only `run` is public.
 """
 
 from pathlib import Path
+from typing import Literal
 
 from .pipeline import segment
 
@@ -15,7 +16,7 @@ def run(
     output_dir: Path,
     separate_segments: bool = False,
     prediction_ID: str = "Seg",
-    device: str = "cuda",
+    device: Literal["cuda", "cpu"] = "cuda",
     tile_step_size: float = 0.5,
 ) -> Path:
     """Segment teeth and jaw structures on a dental CT or CBCT scan.
