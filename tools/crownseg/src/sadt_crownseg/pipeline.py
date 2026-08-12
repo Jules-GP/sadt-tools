@@ -3,21 +3,23 @@
 Labels every tooth of a mesh with its Universal number, as a point-data array
 on a copy of the surface. That array is the precondition for ALI's IOS landmark
 identification and for the IOS modes of ASO, AREG and FlexReg, which is why
-this is its own tool rather than a helper inside any of them.
+this is its own tool rather than a helper inside any of them -- and, since the
+split, why the server sequences CrownSeg before ALI instead of ALI importing
+this module.
 
 Nothing here is ported. The Slicer modules ran the `dentalmodelseg` executable
 out of Slicer's own bin directory, and that executable is only the
 console-script entry point of the `shapeaxi` PyPI package
-(`dentalmodelseg = shapeaxi.dental_model_seg:cml`). Server-side there is no
-Slicer binary to shell out to, so `shapeaxi.dental_model_seg.main` is called
-directly with the namespace its own `cml()` would have built.
+(`dentalmodelseg = shapeaxi.dental_model_seg:cml`). There is no Slicer binary
+to shell out to, so `shapeaxi.dental_model_seg.main` is called directly with
+the namespace its own `cml()` would have built.
 
-Two entry points, following the AMASSSLogic precedent:
-
-* `segment_crowns(...)` -> `CrownSegRun`, the reusable API: the produced meshes
-  and a report, zipping nothing. ALI's IOS engine calls exactly this.
-* `main(...)` -> path to the output directory, the schema adapter CrownSeg.py
-  uses.
+What the move out of the server changed: scratch space lives under the caller's
+`output_dir`, `segment_crowns()` returns the run report rather than a
+`CrownSegRun`, zip extraction is gone (the server unpacks archives before
+`run()` is called), the model is a required argument rather than a name looked
+up in the data store, and the GPU semaphore is gone because each call is its
+own process.
 """
 
 import contextlib
@@ -25,30 +27,15 @@ import io
 import json
 import logging
 import os
-import sys
-import threading
+import shutil
 import time
 from argparse import Namespace
 
-import file_utils
-from base import ToolArgumentError, ToolUnavailableError
-from config import settings
-from data_store import DataNotFoundError, data_store
+from .errors import ToolInputError, ToolUnavailableError
 
-logger = logging.getLogger("CrownSeg")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
-
+logger = logging.getLogger(__name__)
 
 # Extensions shapeaxi's reader handles and this tool therefore discovers.
-# Advertised in the schema through base.FILE_TYPES["surface_or_zip_file"], so
-# the two lists cannot drift into "accepted by the UI, ignored by the engine".
 SURFACE_EXTENSIONS = (".vtk", ".stl")
 
 # Point-data array names that already carry per-tooth labels. A mesh holding
@@ -59,86 +46,90 @@ LABEL_ARRAY_NAMES = ("PredictedID", "UniversalID", "Universal_ID")
 DEFAULT_ARRAY_NAME = "Universal_ID"
 DEFAULT_SUFFIX = "Seg"
 
-# One mesh at a time on the card: the model rasterizes an icosahedron's worth
-# of 320x320 views of the whole arch in one batch.
-_GPU_SEMAPHORE = threading.BoundedSemaphore(max(1, int(settings.CROWNSEG_MAX_GPU_JOBS)))
+WORK_DIRNAME = ".crownseg_work"
 
 _INSTALL_HINT = (
-    "CrownSeg needs shapeaxi and pytorch3d. pytorch3d has no PyPI distribution and "
-    "must be compiled into the deployment image against its torch/CUDA build; every "
-    "shapeaxi release also requires a newer torch than the current image ships. See "
-    "ALI_PORT_CONTEXT.md 4."
+    "CrownSeg's engine is an optional extra: shapeaxi pulls pytorch3d, which "
+    "publishes no usable wheel and is compiled from source. Install it with "
+    "`uv sync --extra segmentation` (needs a CUDA toolkit, see README.md)."
 )
 
 
-class CrownSegRun:
-    """Result of `segment_crowns()`: where the meshes are, and what happened."""
+def _restore_moved_class(saxi_nets) -> bool:
+    """Work around an upstream bug: shapeaxi 2.0.x cannot find its own class.
 
-    def __init__(self, output_dir: str, report: dict, meshes: list):
-        self.output_dir = output_dir
-        self.report = report
-        # Absolute paths of every mesh that now carries tooth labels, whether
-        # this run produced them or found them already labelled.
-        self.meshes = meshes
+    `DentalModelSeg` moved from `shapeaxi.saxi_nets` to
+    `shapeaxi.saxi_nets_lightning`, but `shapeaxi/dental_model_seg.py` -- the
+    module behind shapeaxi's own `dentalmodelseg` console script, and the only
+    supported way in -- still reads it off `saxi_nets`. Every 2.0.x release
+    (2.0.0, 2.0.1, 2.0.2) has this; 1.x referenced the right module. So
+    `dental_model_seg.main()` raises AttributeError before touching a mesh, and
+    the pre-port tool fails in exactly the same way on the deployed image.
+
+    Two lines rather than reimplementing `main()`: this keeps the entry point
+    shapeaxi supports, and the `hasattr` guard makes the workaround vanish by
+    itself the day upstream puts the name back. Report it at
+    DCBIA-OrthoLab/ShapeAXI; delete this function once a release carries the fix.
+    """
+    if hasattr(saxi_nets, "DentalModelSeg"):
+        return False
+
+    from shapeaxi import saxi_nets_lightning
+
+    target = getattr(saxi_nets_lightning, "DentalModelSeg", None)
+    if target is None:
+        raise ToolUnavailableError(
+            "This shapeaxi exposes DentalModelSeg in neither saxi_nets nor "
+            "saxi_nets_lightning; the pinned version is 2.0.2."
+        )
+    saxi_nets.DentalModelSeg = target
+    logger.warning(
+        "shapeaxi %s does not expose DentalModelSeg where its own "
+        "dental_model_seg module looks for it; pointing it at "
+        "saxi_nets_lightning (see _restore_moved_class)",
+        _shapeaxi_version(),
+    )
+    return True
 
 
-def _import_vtk():
+def _shapeaxi_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
     try:
-        import vtk
-    except ImportError as exc:  # pragma: no cover - depends on the deployment
-        raise RuntimeError(f"CrownSeg needs VTK: pip install -r requirements.txt") from exc
-    return vtk
+        return version("shapeaxi")
+    except PackageNotFoundError:  # pragma: no cover - installed by definition here
+        return "unknown"
 
 
 def _import_dental_model_seg():
     """Import shapeaxi's segmentation module, lazily.
 
-    registry.py imports every tool at startup, so a module-level import here
-    would take CrownSeg -- and, through it, nothing else, but still -- out of
-    the registry on any server whose image predates the pytorch3d rebuild.
-    Deferred, the tool loads, publishes its schema through GET /tools, and only
-    an actual run fails, naming what is missing.
+    Deferred so that importing this package -- which `scripts/describe.py` does
+    on every CI run to publish the schema -- costs nothing. It also means a
+    venv without the extra still loads and reports the schema; only an actual
+    segmentation fails, naming what is missing.
     """
     try:
-        from shapeaxi import dental_model_seg
-    except ImportError as exc:  # pragma: no cover - depends on the deployment
-        raise ToolUnavailableError(f"{_INSTALL_HINT} (missing: {exc.name or 'shapeaxi'})") from exc
+        from shapeaxi import dental_model_seg, saxi_nets
+    except ImportError as exc:
+        raise ToolUnavailableError(
+            "{} (missing: {})".format(_INSTALL_HINT, exc.name or "shapeaxi")
+        ) from exc
+
+    _restore_moved_class(saxi_nets)
     return dental_model_seg
 
 
 def resolve_device(requested: str = None) -> str:
     """The device string shapeaxi accepts: exactly "cpu" or "cuda:0"."""
-    try:
-        import torch
-    except ImportError as exc:  # pragma: no cover - depends on the deployment
-        raise ToolUnavailableError(f"{_INSTALL_HINT} (missing: torch)") from exc
+    import torch
 
-    wanted = (requested or settings.DEVICE or "cpu").strip().lower()
+    wanted = (requested or "cpu").strip().lower()
     if wanted.startswith("cuda") and torch.cuda.is_available():
         return "cuda:0"
     if wanted.startswith("cuda"):
-        logger.warning("DEVICE=%s requested but CUDA is unavailable; falling back to CPU", wanted)
+        logger.warning("device=%s requested but CUDA is unavailable; falling back to CPU", wanted)
     return "cpu"
-
-
-def default_model_path() -> str:
-    """The server's configured crown-segmentation checkpoint.
-
-    Exists so a calling tool never has to know where CrownSeg keeps its data:
-    ALI asks for crown segmentation, not for a file under DATA/CrownSeg/.
-
-    Handing shapeaxi no model at all is a third option and is deliberately not
-    taken -- it downloads the checkpoint from GitHub on the spot, and a server
-    holding confidential data does not make outbound calls mid-request.
-    """
-    try:
-        return data_store.resolve_model("CrownSeg", settings.CROWNSEG_MODEL).path
-    except DataNotFoundError as exc:
-        raise FileNotFoundError(
-            f"The crown-segmentation model '{settings.CROWNSEG_MODEL}' is not on this server. "
-            f"Fetch it with `./scripts/setup-models.sh --tool CrownSeg`, or set CROWNSEG_MODEL "
-            f"to one of the names listed by GET /tools/CrownSeg/data. ({exc})"
-        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +142,7 @@ def is_segmented(mesh_path: str) -> bool:
     Reads only the point-data array NAMES, never their values: this decides
     whether to spend minutes of GPU time, and nothing about the patient.
     """
-    vtk = _import_vtk()
+    import vtk
 
     extension = os.path.splitext(mesh_path)[1].lower()
     if extension == ".stl":
@@ -170,44 +161,35 @@ def is_segmented(mesh_path: str) -> bool:
     return bool(names & set(LABEL_ARRAY_NAMES))
 
 
-def discover_meshes(input_path: str, scratch_dir: str) -> list:
-    """Resolve the `input` argument into a list of surface files.
+def discover_meshes(input_path: str) -> list:
+    """Resolve the `meshes` argument into a list of surface files.
 
-    Accepts the three shapes one schema argument can carry: a single mesh, a
-    zip archive of a folder of them, or a folder served from the data store.
-    Folder scanning is recursive, and the tree is what the output mirrors.
+    One mesh, or a folder of them for a batch. Folder scanning is recursive,
+    and the tree is what the output mirrors.
     """
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input path not found: {input_path}")
 
-    if os.path.isfile(input_path) and input_path.lower().endswith(".zip"):
-        input_path = file_utils.extract_zip(
-            input_path,
-            os.path.join(scratch_dir, "input_extracted"),
-            strip_single_root=True,
-            max_total_bytes=settings.MAX_EXTRACTED_MB * 1024 * 1024,
-        )
-
     if os.path.isfile(input_path):
         if not input_path.lower().endswith(SURFACE_EXTENSIONS):
-            raise ToolArgumentError(
+            raise ToolInputError(
                 f"'{os.path.basename(input_path)}' is not a surface mesh. Expected one of: "
                 f"{', '.join(SURFACE_EXTENSIONS)}."
             )
         return [input_path]
 
-    meshes = [
+    found = [
         os.path.join(root, name)
         for root, _dirs, files in os.walk(input_path)
         for name in sorted(files)
         if name.lower().endswith(SURFACE_EXTENSIONS)
     ]
-    if not meshes:
-        raise ToolArgumentError(
+    if not found:
+        raise ToolInputError(
             f"No surface mesh found in the input. Supported extensions: "
             f"{', '.join(SURFACE_EXTENSIONS)}."
         )
-    return sorted(meshes)
+    return sorted(found)
 
 
 def _input_root(input_path: str, meshes: list) -> str:
@@ -224,13 +206,14 @@ def _input_root(input_path: str, meshes: list) -> str:
 # ---------------------------------------------------------------------------
 
 def _run_shapeaxi(csv_path: str, output_dir: str, model_path: str, input_root: str,
-                  array_name: str, suffix: str, device: str, fdi: bool) -> None:
+                  array_name: str, suffix: str, device: str, fdi: bool,
+                  num_workers: int) -> None:
     """Call shapeaxi's own `main()` with the namespace its `cml()` would build.
 
-    stdout is swallowed on purpose. shapeaxi prints "Saving results to
-    <path>" for every mesh, and that path carries the patient's own file name
-    -- which this server never writes to a log (see the note at the top of
-    main.py). The exception it raises on a real failure is untouched.
+    stdout is swallowed on purpose. shapeaxi prints "Saving results to <path>"
+    for every mesh, and that path carries the patient's own file name, which
+    must not reach a log. The exception it raises on a real failure is
+    untouched.
     """
     dental_model_seg = _import_dental_model_seg()
 
@@ -240,7 +223,9 @@ def _run_shapeaxi(csv_path: str, output_dir: str, model_path: str, input_root: s
         model=model_path,
         suffix=suffix,
         out=output_dir,
-        num_workers=max(1, int(settings.CROWNSEG_NUM_WORKERS)),
+        # Must be >= 1: shapeaxi builds its loader with persistent_workers=True,
+        # which PyTorch rejects at 0.
+        num_workers=max(1, int(num_workers)),
         crown_segmentation=0,
         array_name=array_name,
         fdi=1 if fdi else 0,
@@ -249,20 +234,19 @@ def _run_shapeaxi(csv_path: str, output_dir: str, model_path: str, input_root: s
         vtk_folder=input_root,
     )
 
-    with _GPU_SEMAPHORE:
-        with contextlib.redirect_stdout(io.StringIO()):
-            dental_model_seg.main(args)
+    with contextlib.redirect_stdout(io.StringIO()):
+        dental_model_seg.main(args)
 
 
 def _predicted_path(output_dir: str, csv_stem: str, suffix: str, mesh: str,
                     input_root: str) -> str:
     """Where shapeaxi's csv branch writes the segmented copy of `mesh`.
 
-    Mirrors `save_data_vtk_from_csv`: the input path minus its extension,
-    plus `_<suffix>.vtk`, with `vtk_folder` stripped off the front, filed
-    under `<out>/<csv stem>_<suffix>/`. Recomputed rather than parsed back out
-    of shapeaxi's stdout, which is where the file names this server must not
-    log would have had to travel.
+    Mirrors `save_data_vtk_from_csv`: the input path minus its extension, plus
+    `_<suffix>.vtk`, with `vtk_folder` stripped off the front, filed under
+    `<out>/<csv stem>_<suffix>/`. Recomputed rather than parsed back out of
+    shapeaxi's stdout, which is where the file names this tool must not log
+    would have had to travel.
     """
     without_extension = os.path.splitext(mesh)[0] + f"_{suffix}.vtk"
     relative = without_extension.replace(input_root, "").lstrip(os.sep)
@@ -271,40 +255,35 @@ def _predicted_path(output_dir: str, csv_stem: str, suffix: str, mesh: str,
 
 def segment_crowns(
     input_path: str,
-    model_path: str = None,
+    model_path: str,
+    output_dir: str,
     array_name: str = DEFAULT_ARRAY_NAME,
     suffix: str = DEFAULT_SUFFIX,
     fdi: bool = False,
     skip_segmented: bool = True,
-    device: str = None,
-    scratch_dir: str = None,
-    output_dir: str = None,
-) -> CrownSegRun:
+    device: str = "cuda",
+    num_workers: int = 2,
+) -> dict:
     """Label the teeth of one mesh or a whole folder of them.
 
-    `model_path=None` uses the server's configured checkpoint (see
-    `default_model_path`), which is how a calling tool asks for crown
-    segmentation without knowing where CrownSeg keeps its data.
-
     `skip_segmented=True` passes an already-labelled mesh through unchanged
-    instead of re-running the network on it. That is what makes ALI's IOS mode
-    a single button for both raw and pre-segmented input.
+    instead of re-running the network on it, which is what makes a mixed batch
+    of raw and pre-segmented meshes one call.
     """
     started_at = time.monotonic()
 
     array_name = (array_name or DEFAULT_ARRAY_NAME).strip() or DEFAULT_ARRAY_NAME
     suffix = (suffix or DEFAULT_SUFFIX).strip() or DEFAULT_SUFFIX
 
-    if scratch_dir is None:
-        scratch_dir = file_utils.make_scratch_dir("CrownSeg_")
-    os.makedirs(scratch_dir, exist_ok=True)
+    output_dir = os.fspath(output_dir)
+    work_dir = os.path.join(output_dir, WORK_DIRNAME)
+    os.makedirs(work_dir, exist_ok=True)
 
-    if output_dir is None:
-        output_dir = os.path.join(scratch_dir, f"CrownSeg_{suffix}")
-    os.makedirs(output_dir, exist_ok=True)
+    if not os.path.isfile(os.fspath(model_path)):
+        raise ToolInputError(f"Crown-segmentation checkpoint not found: {model_path}")
 
-    meshes = discover_meshes(input_path, scratch_dir)
-    input_root = _input_root(input_path, meshes)
+    meshes = discover_meshes(os.fspath(input_path))
+    input_root = _input_root(os.fspath(input_path), meshes)
 
     already_segmented, to_segment = [], []
     for mesh in meshes:
@@ -315,7 +294,7 @@ def segment_crowns(
 
     # A mesh that already carries labels is copied, not re-predicted. Copied
     # rather than referenced in place because the caller is handed one output
-    # tree, and because the input may live in read-only DATA_DIR.
+    # tree, and because the input may live on a read-only mount.
     for mesh in already_segmented:
         relative = os.path.relpath(mesh, input_root)
         base = os.path.splitext(os.path.basename(mesh))[0]
@@ -328,29 +307,33 @@ def segment_crowns(
         produced.append(destination)
 
     if to_segment:
-        model_path = model_path or default_model_path()
         device = resolve_device(device)
 
-        # Written into the scratch dir. The Slicer module wrote this csv into
-        # the extension's own source folder, which breaks a read-only install
-        # and leaves a file behind pointing at the patient's data.
-        csv_path = os.path.join(scratch_dir, "crownseg_input.csv")
+        # Written into the work dir. The Slicer module wrote this csv into the
+        # extension's own source folder, which breaks a read-only install and
+        # leaves a file behind pointing at the patient's data.
+        csv_path = os.path.join(work_dir, "crownseg_input.csv")
         with open(csv_path, "w", encoding="utf-8", newline="") as handle:
             handle.write("surf\n")
             for mesh in to_segment:
                 handle.write(f"{mesh}\n")
 
         logger.info("CrownSeg: segmenting %d mesh(es) on %s", len(to_segment), device)
-        _run_shapeaxi(
-            csv_path=csv_path,
-            output_dir=output_dir,
-            model_path=model_path,
-            input_root=input_root,
-            array_name=array_name,
-            suffix=suffix,
-            device=device,
-            fdi=fdi,
-        )
+        try:
+            _run_shapeaxi(
+                csv_path=csv_path,
+                output_dir=output_dir,
+                model_path=os.fspath(model_path),
+                input_root=input_root,
+                array_name=array_name,
+                suffix=suffix,
+                device=device,
+                fdi=fdi,
+                num_workers=num_workers,
+            )
+        except Exception:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise
 
         csv_stem = os.path.splitext(os.path.basename(csv_path))[0]
         for mesh in to_segment:
@@ -366,6 +349,8 @@ def segment_crowns(
                     "error": "the segmentation produced no output for this mesh",
                 }
 
+    shutil.rmtree(work_dir, ignore_errors=True)
+
     if not produced:
         raise RuntimeError("CrownSeg produced no segmented mesh for any input.")
 
@@ -376,6 +361,10 @@ def segment_crowns(
         "numbering": "FDI" if fdi else "Universal",
         "device": device if to_segment else None,
         "meshes": records,
+        # Absolute paths of every mesh that now carries tooth labels, whether
+        # this run produced them or found them already labelled. This is what a
+        # caller sequencing CrownSeg before ALI reads.
+        "segmented_meshes": produced,
         "summary": {
             "total": len(meshes),
             "segmented": sum(1 for r in records.values() if r["status"] == "segmented"),
@@ -388,7 +377,7 @@ def segment_crowns(
     with open(os.path.join(output_dir, "run_report.json"), "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
 
-    return CrownSegRun(output_dir=output_dir, report=report, meshes=produced)
+    return report
 
 
 def _write_as_vtk(source: str, destination: str) -> None:
@@ -400,7 +389,7 @@ def _write_as_vtk(source: str, destination: str) -> None:
     special-case. (The Slicer module copied it verbatim, and its landmark CLI
     then discovered only .vtk -- so those meshes were silently never used.)
     """
-    vtk = _import_vtk()
+    import vtk
 
     extension = os.path.splitext(source)[1].lower()
     reader = vtk.vtkSTLReader() if extension == ".stl" else vtk.vtkPolyDataReader()
@@ -411,30 +400,3 @@ def _write_as_vtk(source: str, destination: str) -> None:
     writer.SetFileName(destination)
     writer.SetInputData(reader.GetOutput())
     writer.Write()
-
-
-def main(
-    input: str,
-    model: str = None,
-    array_name: str = DEFAULT_ARRAY_NAME,
-    suffix: str = DEFAULT_SUFFIX,
-    numbering: str = "Universal",
-    skip_segmented: bool = True,
-) -> str:
-    """Schema adapter: run `segment_crowns` and return the folder of results.
-
-    Returns a DIRECTORY: with `output_kind = "files"`, main.py bundles it and
-    streams the archive, so no zip code lives in this tool.
-    """
-    scratch_dir = file_utils.make_scratch_dir("CrownSeg_")
-
-    run = segment_crowns(
-        input_path=input,
-        model_path=model or None,
-        array_name=array_name,
-        suffix=suffix,
-        fdi=numbering == "FDI",
-        skip_segmented=skip_segmented,
-        scratch_dir=scratch_dir,
-    )
-    return run.output_dir
