@@ -2,20 +2,20 @@
 landmark types, and the tooth name <-> universal ID table.
 
 These used to live inside the Qt widget, duplicated between the UI's checkbox
-labels and each CLI's parsed strings. The server owns them now and publishes
-them through `ArgSpec.choices`, so a client renders its checkboxes straight
-from GET /tools and the two can no longer disagree.
+labels and each CLI's parsed strings. They live here once now, and `run()`
+republishes them as `Literal` options, so a client renders its check boxes
+straight from the schema and the two can no longer disagree.
 
-Nothing here imports anything heavy: this module is read at registry discovery
-time.
+Nothing here imports anything heavy: describe.py reads this module on every CI
+run to publish the schema.
 """
 
 # ---------------------------------------------------------------------------
 # CBCT landmarks
 # ---------------------------------------------------------------------------
-# One tab per group, published through `ArgSpec.groups`. The option labels are
-# not decorated with their group name because those labels ARE the names the
-# server matches against a reference file.
+# Grouped by anatomical region. The option labels are not decorated with their
+# group name because those labels ARE the names matched against a reference
+# file. Nothing publishes the grouping any more -- see README.md.
 CBCT_LANDMARK_GROUPS = {
     "Cranial base": (
         "Ba", "C2", "C3", "C4", "LFZyg", "LPo", "N", "RFZyg", "RPo", "S",

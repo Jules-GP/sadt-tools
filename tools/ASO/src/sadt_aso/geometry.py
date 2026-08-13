@@ -17,7 +17,7 @@ import logging
 
 import numpy as np
 
-logger = logging.getLogger("ASO")
+logger = logging.getLogger(__name__)
 
 # Steps init_icp reports, so a caller that needs SimpleITK transforms (the CBCT
 # engine composes them to resample the volume) can rebuild them in the same

@@ -23,7 +23,7 @@ import SimpleITK as sitk
 
 from ..markups import is_markups_file
 
-logger = logging.getLogger("ASO")
+logger = logging.getLogger(__name__)
 
 _INSTALL_HINT = (
     "Reading this DICOM series needs the dicom2nifti package. Install it with "

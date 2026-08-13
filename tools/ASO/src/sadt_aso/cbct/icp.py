@@ -17,7 +17,7 @@ import vtk
 
 from .. import geometry
 
-logger = logging.getLogger("ASO")
+logger = logging.getLogger(__name__)
 
 # Fewest landmarks the coarse alignment can work with: it picks three distinct
 # ones. The original checked `> 3` in `ICP()` and `< 3` four lines later, and

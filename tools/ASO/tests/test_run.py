@@ -1,38 +1,31 @@
-"""Unit tests for the ASO tool logic.
+"""Unit tests for the ASO tool.
 
-No GPU, no real models and no HTTP: the landmark seam (`ali_client`) is
-monkeypatched, and everything else -- discovery, pairing, recentring,
-registration, output naming, the report -- runs for real against synthetic
-volumes and meshes.
+No GPU and no real models: the landmark tool is stood in for by a fake
+supervisor, and everything else -- discovery, pairing, recentring, registration,
+output naming, the report -- runs for real against synthetic volumes and meshes.
 
 Every test docstring names the defect of the original CLIs it prevents coming
 back.
 
-Run just this module:
-    cd server && python -m pytest tools/ASO/test/
+    cd tools/ASO && uv run pytest
 """
 
 import json
 import os
-
-# Set before anything imports config.Settings() (file_utils does, via the tool
-# logic), so the suite runs regardless of the local environment.
-os.environ.setdefault("API_TOKEN", "test-token")
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 import vtk
 
-from base import Selection, ToolArgumentError
-from config import settings
-from tools.ASO.ASO import ASOTool
-from tools.ASO.src import ASOLogic, ali_client, catalogs, geometry, markups
-from tools.ASO.src.cbct import icp as cbct_icp
-from tools.ASO.src.cbct import pipeline as cbct_pipeline
-from tools.ASO.src.ios import icp as ios_icp
-from tools.ASO.src.ios import pipeline as ios_pipeline
-from tools.ASO.src.ios import surfaces
+from sadt_aso import dispatch, run
+from sadt_aso import catalogs, geometry, markups
+from sadt_aso.cbct import icp as cbct_icp
+from sadt_aso.cbct import pipeline as cbct_pipeline
+from sadt_aso.errors import SupervisorRequired, ToolInputError
+from sadt_aso.ios import icp as ios_icp
+from sadt_aso.ios import pipeline as ios_pipeline
+from sadt_aso.ios import surfaces
 
 
 # ---------------------------------------------------------------------------
@@ -172,50 +165,95 @@ def _ios_case(root, key="P1", array_name="Universal_ID", with_markups=False, jaw
     return moved
 
 
-@pytest.fixture(autouse=True)
-def scratch_under_tmp(tmp_path, monkeypatch):
-    """Keep every scratch directory the tool makes inside the test's tmp_path."""
-    monkeypatch.setattr(settings, "TEMP_DIR", str(tmp_path / "server_tmp"))
+def _run_aso(tmp_path, **kwargs):
+    """`run()` with an output directory chosen for the test.
+
+    Returns it as a string, because that is what the assertions below read.
+    """
+    output_dir = kwargs.pop("output_dir", None) or (tmp_path / "out")
+    return str(run(output_dir=output_dir, **kwargs))
 
 
 def _report(output_dir: str) -> dict:
-    with open(os.path.join(output_dir, ASOLogic.REPORT_NAME)) as handle:
+    with open(os.path.join(output_dir, dispatch.REPORT_NAME)) as handle:
         return json.load(handle)
 
 
 # ---------------------------------------------------------------------------
-# schema
+# The published options and the catalogs cannot drift apart
 # ---------------------------------------------------------------------------
 
-def test_schema_is_valid():
-    """Every tool must survive the check registry.py runs at startup."""
-    ASOTool().check_schema()
+def _choices(argument):
+    """The `Literal` options `run()` publishes for one argument."""
+    import typing
+
+    hint = typing.get_type_hints(run)[argument]
+    if typing.get_origin(hint) is list:
+        hint = typing.get_args(hint)[0]
+    return list(typing.get_args(hint))
+
+
+def test_the_published_options_are_the_catalogs_own():
+    """`Literal` takes literals only, so it cannot be built from the catalogs.
+    That makes the signature a second declaration of the same sets, and this is
+    what keeps them honest: an option added to one and not the other would be
+    unselectable from the client, or offered and then refused."""
+    assert _choices("cbct_landmarks") == list(catalogs.CBCT_LANDMARKS)
+    assert _choices("ios_teeth") == list(catalogs.TOOTH_IDS)
+    assert _choices("ios_landmark_types") == list(catalogs.IOS_LANDMARK_TYPES)
+    assert _choices("ios_occlusion") == list(catalogs.OCCLUSION_CHOICES)
+    assert _choices("modality") == list(catalogs.MODALITY_CHOICES)
+    assert _choices("automation") == list(catalogs.AUTOMATION_CHOICES)
+
+
+def test_the_published_defaults_are_the_catalogs_own():
+    """A default outside its option list gives the client a picker that cannot
+    produce the value the tool starts from."""
+    import inspect
+
+    parameters = inspect.signature(run).parameters
+    assert set(parameters["cbct_landmarks"].default) == set(catalogs.DEFAULT_CBCT_LANDMARKS)
+    assert set(parameters["ios_teeth"].default) == set(catalogs.DEFAULT_TEETH)
+    assert set(parameters["ios_landmark_types"].default) == set(
+        catalogs.DEFAULT_IOS_LANDMARK_TYPES
+    )
+    for argument in ("cbct_landmarks", "ios_teeth", "ios_landmark_types", "ios_jaws"):
+        for value in parameters[argument].default:
+            assert value in _choices(argument), (argument, value)
 
 
 def test_mode_specific_arguments_are_optional():
     """A required argument belonging to the inactive mode would block every
-    request in the other one -- the schema cannot say 'only in mode X'."""
+    call in the other one -- the schema cannot say "only in mode X"."""
+    import inspect
+
+    parameters = inspect.signature(run).parameters
     optional = (
-        "landmark_models", "cbct_landmarks", "ios_teeth", "ios_landmark_types",
-        "ios_jaws", "ios_occlusion", "dicom_input", "output_suffix",
+        "modality", "automation", "landmarks", "landmark_models", "cbct_landmarks",
+        "ios_teeth", "ios_landmark_types", "ios_jaws", "ios_occlusion", "dicom_input",
+        "output_suffix",
     )
     for name in optional:
-        assert not ASOTool.arguments[name].required, name
-    for name in ("modality", "automation", "input", "reference"):
-        assert ASOTool.arguments[name].required, name
+        assert parameters[name].default is not inspect.Parameter.empty, name
+    for name in ("input", "reference", "output_dir"):
+        assert parameters[name].default is inspect.Parameter.empty, name
 
 
-def test_input_declares_a_file_type_first():
-    """GET /tools publishes types[0] as `type`, and the Slicer client keys its
-    file picker off it: leading with "folder" makes the argument look
-    non-file client-side."""
-    assert ASOTool.arguments["input"].types[0] == "volume_or_zip_file"
-    assert "folder" in ASOTool.arguments["input"].types
-    assert ASOTool.arguments["reference"].types[0] == "zip_file"
+def test_the_supervisor_is_keyword_only_and_unannotated():
+    """That shape is what `describe.py` reads to keep it out of the schema. A
+    client never sends it, and a `Path` annotation would put a file picker on
+    every ASO form."""
+    import inspect
+
+    parameter = inspect.signature(run).parameters["sup"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.annotation is inspect.Parameter.empty
+    # Defaulted, so the tool stays callable standalone with landmarks supplied.
+    assert parameter.default is None
 
 
 def test_catalogs_have_no_duplicates_and_valid_defaults():
-    """ALI shipped a UI saying 'UR3OI' against a CLI expecting 'UR3OIP'. One
+    """ALI shipped a UI saying "UR3OI" against a CLI expecting "UR3OIP". One
     vocabulary, defined once, with defaults that are members of it."""
     assert len(catalogs.CBCT_LANDMARKS) == len(set(catalogs.CBCT_LANDMARKS))
     assert len(catalogs.TOOTH_IDS) == 32
@@ -229,47 +267,12 @@ def test_catalogs_have_no_duplicates_and_valid_defaults():
     assert len(per_jaw["Upper"]) == 3 and len(per_jaw["Lower"]) == 3
 
 
-@pytest.mark.parametrize(
-    "wire",
-    ["Ba,S,N,RPo,LPo", {"Ba": True, "S": True, "N": True, "RPo": True, "LPo": True},
-     '{"Ba": true, "S": true, "N": true, "RPo": true, "LPo": true}'],
-)
-def test_multichoice_wire_formats(wire):
-    """A multichoice arrives as a comma list, a dict or JSON; whatever arrives
-    is the COMPLETE selection, read back in DECLARATION order (not the order it
-    was sent in, and never sorted)."""
-    cleaned = ASOTool().validate(
-        {
-            "modality": "CBCT", "automation": "Semi-Automated",
-            "input": "/tmp/x.nii.gz", "reference": "/tmp/ref.zip",
-            "cbct_landmarks": wire,
-        }
-    )
-    selected = cleaned["cbct_landmarks"].selected
-    assert set(selected) == {"Ba", "S", "N", "RPo", "LPo"}
-    assert list(selected) == [
-        name for name in catalogs.CBCT_LANDMARK_CHOICES if name in set(selected)
-    ]
-
-
-def test_omitted_multichoice_falls_back_to_the_declared_defaults():
-    """An absent optional choice argument gets `choices`'s own defaults -- the
-    trap a `default` FIELD on ArgSpec silently turns into None."""
-    cleaned = ASOTool().validate(
-        {
-            "modality": "CBCT", "automation": "Semi-Automated",
-            "input": "/tmp/x.nii.gz", "reference": "/tmp/ref.zip",
-        }
-    )
-    assert set(cleaned["cbct_landmarks"].selected) == set(catalogs.DEFAULT_CBCT_LANDMARKS)
-
-
-def test_initial_matches_the_python_default():
-    """A form always sends every widget, so a spin box starting at Qt's 0
-    overrides run()'s default -- which is how AMASSS shipped unsmoothed
-    surfaces."""
-    assert ASOTool.arguments["output_suffix"].initial == "Or"
-    assert ASOTool.arguments["dicom_input"].initial is False
+def test_an_unknown_option_is_refused_not_dropped():
+    """`Literal` is published, not enforced -- the runner calls run(**params)
+    from a JSON object -- so a stale client naming an option that no longer
+    exists must be told, not handed a narrower run than it asked for."""
+    with pytest.raises(ToolInputError, match="NoSuchPoint"):
+        dispatch._selected(["Ba", "NoSuchPoint"], catalogs.CBCT_LANDMARK_CHOICES, "cbct_landmarks")
 
 
 # ---------------------------------------------------------------------------
@@ -368,13 +371,13 @@ def test_the_run_report_names_the_unmatched_landmark_files(tmp_path):
     _write_scan(root / "P1_CBCT.nii.gz")
     _write_markups(str(root / "P1.mrk.json"), _REFERENCE_POINTS)
 
-    report = ASOLogic.orient(
+    report = dispatch.orient(
         input_path=str(root),
         reference_path=_cbct_reference(tmp_path),
         modality=catalogs.MODALITY_CBCT,
         automation=catalogs.AUTOMATION_SEMI,
         cbct_landmarks=list(_REFERENCE_POINTS),
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     ).report
 
     assert report["summary"]["oriented"] == 0
@@ -538,13 +541,13 @@ def test_the_transform_file_maps_the_result_back_to_the_original(tmp_path):
     _write_scan(root / "p1_scan.nii.gz", size=(24, 24, 24), spacing=(0.4, 0.4, 0.4))
     _write_markups(root / "p1_lm.mrk.json", original)
 
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(root),
         reference_path=_cbct_reference(tmp_path),
         modality=catalogs.MODALITY_CBCT,
         automation=catalogs.AUTOMATION_SEMI,
         cbct_landmarks=list(_REFERENCE_POINTS),
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     oriented = markups.load_landmarks(os.path.join(run.output_dir, "p1_lm_Or.mrk.json"))
     transform = sitk.ReadTransform(os.path.join(run.output_dir, "p1_Or_transform.tfm"))
@@ -573,13 +576,13 @@ def test_landmarks_follow_the_recentring(tmp_path):
 def test_semi_automated_cbct_end_to_end(tmp_path):
     """The mode that must work on day one, with no server-side model at all."""
     _cbct_case(tmp_path / "input")
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(tmp_path / "input"),
         reference_path=_cbct_reference(tmp_path),
         modality=catalogs.MODALITY_CBCT,
         automation=catalogs.AUTOMATION_SEMI,
         cbct_landmarks=list(_REFERENCE_POINTS),
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     entry = run.report["patients"]["patient1"]
     assert entry["status"] == "ok"
@@ -600,13 +603,13 @@ def test_the_input_tree_is_untouched(tmp_path):
     before = {
         name: os.path.getsize(os.path.join(root, name)) for name in sorted(os.listdir(root))
     }
-    ASOLogic.orient(
+    dispatch.orient(
         input_path=str(root),
         reference_path=_cbct_reference(tmp_path),
         modality=catalogs.MODALITY_CBCT,
         automation=catalogs.AUTOMATION_SEMI,
         cbct_landmarks=list(_REFERENCE_POINTS),
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     after = {
         name: os.path.getsize(os.path.join(root, name)) for name in sorted(os.listdir(root))
@@ -621,13 +624,13 @@ def test_output_keeps_the_input_format_and_is_compressed(tmp_path, given, expect
     """A scan sent uncompressed must not come back as a 191 MB file per patient;
     and ITK has no ".nrrd.gz" writer at all, so NRRD keeps its own extension."""
     _cbct_case(tmp_path / "input", extension=given)
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(tmp_path / "input"),
         reference_path=_cbct_reference(tmp_path),
         modality=catalogs.MODALITY_CBCT,
         automation=catalogs.AUTOMATION_SEMI,
         cbct_landmarks=list(_REFERENCE_POINTS),
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     assert f"patient1_Or{expected}" in run.report["patients"]["patient1"]["outputs"]
 
@@ -638,13 +641,13 @@ def test_a_patient_without_landmarks_fails_alone(tmp_path):
     root = tmp_path / "input"
     _cbct_case(root, key="good")
     _write_scan(root / "orphan_scan.nii.gz")
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(root),
         reference_path=_cbct_reference(tmp_path),
         modality=catalogs.MODALITY_CBCT,
         automation=catalogs.AUTOMATION_SEMI,
         cbct_landmarks=list(_REFERENCE_POINTS),
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     assert run.report["patients"]["good"]["status"] == "ok"
     assert run.report["patients"]["orphan"]["status"] == "failed"
@@ -656,13 +659,13 @@ def test_the_output_tree_mirrors_the_input(tmp_path):
     """Two patients in different folders must land in different folders."""
     _cbct_case(tmp_path / "input" / "siteA", key="scan")
     _cbct_case(tmp_path / "input" / "siteB", key="scan")
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(tmp_path / "input"),
         reference_path=_cbct_reference(tmp_path),
         modality=catalogs.MODALITY_CBCT,
         automation=catalogs.AUTOMATION_SEMI,
         cbct_landmarks=list(_REFERENCE_POINTS),
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     assert os.path.isfile(os.path.join(run.output_dir, "siteA", "scan_Or.nii.gz"))
     assert os.path.isfile(os.path.join(run.output_dir, "siteB", "scan_Or.nii.gz"))
@@ -682,13 +685,13 @@ def test_the_run_is_reproducible(tmp_path):
     transforms = []
     for index in (0, 1):
         _cbct_case(tmp_path / f"input{index}")
-        run = ASOLogic.orient(
+        run = dispatch.orient(
             input_path=str(tmp_path / f"input{index}"),
             reference_path=_cbct_reference(tmp_path),
             modality=catalogs.MODALITY_CBCT,
             automation=catalogs.AUTOMATION_SEMI,
             cbct_landmarks=list(_REFERENCE_POINTS),
-            scratch_dir=str(tmp_path / f"scratch{index}"),
+            output_dir=str(tmp_path / f"out{index}"),
         )
         with open(os.path.join(run.output_dir, "patient1_lm_Or.mrk.json")) as handle:
             transforms.append(handle.read())
@@ -696,208 +699,212 @@ def test_the_run_is_reproducible(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# CBCT: fully automated
+# CBCT: fully automated -- the supervisor seam
 # ---------------------------------------------------------------------------
 
-def test_the_landmark_tool_is_deployed_and_takes_what_aso_drives_it_with():
-    """ALI is registered on this server now, so this mode is live.
+class FakeSup:
+    """A supervisor, as a tool sees one: duck-typed, five members, no import.
 
-    The two tests below still cover the absent-tool path, but by REMOVING the
-    tool rather than by relying on it being missing -- which is what they used
-    to do, and what silently turned them into tests of a temporary state.
+    Records what it was asked for, and writes the landmark files the real tool
+    would have written -- into the output directory it is handed, so the seam
+    (write there, read back, merge per patient) is exercised rather than
+    stubbed over.
     """
-    from registry import TOOLS
 
-    assert ali_client.is_available(settings.ASO_LANDMARK_TOOL)
-    tool = TOOLS[settings.ASO_LANDMARK_TOOL]
-    # The contract ali_client checks before every call. A drift here is one
-    # clear message instead of a 422 from inside the other tool.
-    for name in ali_client._REQUIRED_ARGUMENTS:
-        assert name in tool.arguments, name
+    def __init__(self, predictions: dict, tmp_path=None):
+        self.predictions = predictions
+        self.out = tmp_path
+        self.tmp = tmp_path
+        self.calls = []
+        self.messages = []
+
+    def run(self, tool, **params):
+        # The input is captured HERE, not after the run: it lives in the
+        # working directory, which is removed before `orient` returns.
+        self.calls.append((tool, params))
+        # Read into memory, not just listed: the files live in the working
+        # directory, which is removed before `orient` returns.
+        self.sent = [
+            sitk.ReadImage(os.path.join(root, name))
+            for root, _dirs, files in os.walk(str(params["input"]))
+            for name in sorted(files)
+        ]
+        output_dir = params["output_dir"]
+        for key, landmarks in self.predictions.items():
+            markups.write_landmarks(
+                landmarks, os.path.join(str(output_dir), f"{key}_lm_Pred.mrk.json")
+            )
+        from pathlib import Path
+
+        return Path(str(output_dir))
+
+    def progress(self, fraction, message):
+        self.messages.append((fraction, message))
+
+    def log(self, message):
+        self.messages.append((None, message))
 
 
-def test_fully_automated_cbct_says_so_when_the_landmark_tool_is_missing(tmp_path, monkeypatch):
-    """A server that has not deployed it must fail with an explanation and a
-    way forward, not a 404 from somewhere inside the server."""
-    monkeypatch.setattr(ali_client, "is_available", lambda tool_name: False)
-    with pytest.raises(ToolArgumentError) as raised:
-        ASOLogic.main(
-            input=str(tmp_path), modality="CBCT", automation="Fully-Automated",
-            reference=str(tmp_path), landmark_models="CBCT_landmark_models_ALI",
+def _predicted():
+    return _rotate(_REFERENCE_POINTS, (0.2, 1.0, 0.3), 14.0)
+
+
+def test_fully_automated_cbct_says_so_when_there_is_no_supervisor(tmp_path):
+    """Nothing about the request is wrong -- there is just no way to reach the
+    landmark tool. So the message names the way forward rather than an argument
+    to change, and it is a class of its own so a caller can tell it apart."""
+    with pytest.raises(SupervisorRequired) as raised:
+        _run_aso(
+            tmp_path, input=str(tmp_path), reference=str(tmp_path),
+            modality="CBCT", automation="Fully-Automated",
+            landmark_models="CBCT_landmark_models_ALI",
         )
     message = str(raised.value)
-    assert settings.ASO_LANDMARK_TOOL in message
+    assert dispatch.LANDMARK_TOOL in message
     assert "Semi-Automated" in message
+    assert "landmarks" in message
 
 
-def test_the_missing_tool_is_reported_before_the_missing_model(tmp_path, monkeypatch):
-    """With the landmark tool absent, naming a model cannot help -- so that is
-    what the caller is told, whether or not they picked one. The empty dropdown
-    is the common case, and "name a model" would send them looking for a bundle
-    that changes nothing."""
-    monkeypatch.setattr(ali_client, "is_available", lambda tool_name: False)
-    with pytest.raises(ToolArgumentError) as raised:
-        ASOLogic.main(
-            input=str(tmp_path), modality="CBCT", automation="Fully-Automated",
-            reference=str(tmp_path),
+def test_the_missing_supervisor_is_reported_before_the_missing_model(tmp_path):
+    """With no way to run the landmark tool, naming a model cannot help -- so
+    that is what the caller is told, whether or not they picked one."""
+    with pytest.raises(SupervisorRequired):
+        _run_aso(
+            tmp_path, input=str(tmp_path), reference=str(tmp_path),
+            modality="CBCT", automation="Fully-Automated",
         )
-    assert settings.ASO_LANDMARK_TOOL in str(raised.value)
 
 
-class _FakeLandmarkTool:
-    """Stands in for the registered landmark tool, recording what it was asked
-    for. `arguments` mirrors the three names ali_client checks the contract
-    against, plus the optional prediction_ID."""
-
-    arguments = {"input": None, "model": None, "landmarks": None, "prediction_ID": None}
-
-    def __init__(self, output_dir=None, error=None):
-        self.output_dir = output_dir
-        self.error = error
-        self.received = None
-
-    def invoke(self, args):
-        self.received = args
-        if self.error is not None:
-            raise self.error
-        return self.output_dir
+def test_fully_automated_cbct_needs_a_model_bundle(tmp_path):
+    """It used to be optional, because the server picked a bundle matching the
+    input from its own hosted models. A tool no longer resolves paths, so the
+    bundle has to be named -- and saying which argument is the difference
+    between a fixable request and a failure inside another tool."""
+    with pytest.raises(ToolInputError, match="landmark_models"):
+        _run_aso(
+            tmp_path, input=str(tmp_path), reference=str(tmp_path),
+            modality="CBCT", automation="Fully-Automated",
+            sup=FakeSup({}, tmp_path),
+        )
 
 
-def _register_fake_tool(monkeypatch, tool):
-    """ali_client does `from registry import TOOLS` INSIDE its functions (the
-    module-level import would be a cycle), so patching the attribute is enough
-    -- the import runs again on every call."""
-    import registry
-
-    monkeypatch.setattr(registry, "TOOLS", {settings.ASO_LANDMARK_TOOL: tool})
-    return tool
-
-
-def test_fully_automated_cbct_does_not_require_a_model_name(tmp_path, monkeypatch):
-    """Omitting 'landmark_models' must reach the landmark tool, not a 422.
-
-    It used to be rejected up front, which no client could satisfy honestly: a
-    combo box selects its first entry as soon as it is filled, and the list it
-    is filled from (DATA/ASO/models/) holds the REFERENCE bundles too. So
-    "name a bundle or else" turned into "submit whichever name happens to sort
-    first", and a reference bundle arrived where landmark weights were
-    expected.
-    """
-    monkeypatch.setattr(ali_client, "is_available", lambda tool_name: True)
-    predicted = _rotate(_REFERENCE_POINTS, (0.2, 1.0, 0.3), 14.0)
-    monkeypatch.setattr(
-        ali_client,
-        "predict_landmarks",
-        lambda input_dir, tool_name, model_name, landmarks, work_dir: {
-            "patient1": predicted
-        },
-    )
+def test_fully_automated_cbct_runs_through_the_supervisor(tmp_path):
+    """The seam end to end: predictions replace the caller's markups and
+    nothing else changes."""
     root = tmp_path / "input"
     _write_scan(root / "patient1_scan.nii.gz")
+    sup = FakeSup({"patient1": _predicted()}, tmp_path)
 
-    output_dir = ASOLogic.main(
-        input=str(root), modality="CBCT", automation="Fully-Automated",
-        reference=_cbct_reference(tmp_path),
-        cbct_landmarks=Selection({name: True for name in _REFERENCE_POINTS}),
-    )
-    assert _report(output_dir)["patients"]["patient1"]["status"] == "ok"
-
-
-def test_no_model_name_means_the_argument_is_omitted_not_sent_empty(tmp_path, monkeypatch):
-    """The landmark tool picks its own bundle only when `model` is ABSENT.
-    Sending "" would be a named bundle that does not exist."""
-    tool = _register_fake_tool(monkeypatch, _FakeLandmarkTool(output_dir=str(tmp_path)))
-
-    ali_client._invoke_ali(str(tmp_path), settings.ASO_LANDMARK_TOOL, None, ["Ba"], str(tmp_path))
-
-    assert "model" not in tool.received
-    assert tool.received["landmarks"] == {"Ba": True}
-
-
-def test_a_named_model_is_forwarded_unchanged(tmp_path, monkeypatch):
-    """Naming one still forces that bundle -- the auto-pick is a default, not a
-    policy."""
-    tool = _register_fake_tool(monkeypatch, _FakeLandmarkTool(output_dir=str(tmp_path)))
-
-    ali_client._invoke_ali(
-        str(tmp_path), settings.ASO_LANDMARK_TOOL, "/data/ASO/models/Bundle", ["Ba"], str(tmp_path)
-    )
-
-    assert tool.received["model"] == "/data/ASO/models/Bundle"
-
-
-def test_a_reference_bundle_named_as_the_model_says_which_field_to_clear(tmp_path, monkeypatch):
-    """The landmark tool judges the bundle and says so in its own vocabulary;
-    it cannot know ASO offered that name in a list that also holds the
-    references. Naming the field is the whole difference between "wrong
-    weights" and "wrong field"."""
-    _register_fake_tool(
-        monkeypatch,
-        _FakeLandmarkTool(error=ToolArgumentError("No CBCT landmark weights found in 'Gold'.")),
-    )
-
-    with pytest.raises(ToolArgumentError) as raised:
-        ali_client._invoke_ali(
-            str(tmp_path), settings.ASO_LANDMARK_TOOL,
-            "/data/ASO/models/CBCT_Gold_Frankfurt_Horizontal_Midsagittal_Plane",
-            ["Ba"], str(tmp_path),
-        )
-
-    message = str(raised.value)
-    # The tool's own diagnosis survives, and ASO's guidance is added to it.
-    assert "No CBCT landmark weights found" in message
-    assert "CBCT_Gold_Frankfurt_Horizontal_Midsagittal_Plane" in message
-    assert "Leave 'landmark_models' empty" in message
-
-
-def test_an_unnamed_model_does_not_get_the_wrong_field_advice(tmp_path, monkeypatch):
-    """Nothing was named, so 'clear the field' would be nonsense: the tool's
-    own message has to come through untouched."""
-    _register_fake_tool(
-        monkeypatch,
-        _FakeLandmarkTool(error=ToolArgumentError("No model bundle is hosted for ALI.")),
-    )
-
-    with pytest.raises(ToolArgumentError) as raised:
-        ali_client._invoke_ali(
-            str(tmp_path), settings.ASO_LANDMARK_TOOL, None, ["Ba"], str(tmp_path)
-        )
-
-    assert "landmark_models" not in str(raised.value)
-
-
-def test_fully_automated_cbct_runs_once_the_tool_is_there(tmp_path, monkeypatch):
-    """The seam is wired end to end: with the landmark tool present, predictions
-    replace the caller's markups and nothing else changes."""
-    root = tmp_path / "input"
-    _write_scan(root / "patient1_scan.nii.gz")
-    predicted = _rotate(_REFERENCE_POINTS, (0.2, 1.0, 0.3), 14.0)
-
-    monkeypatch.setattr(ali_client, "is_available", lambda tool_name: True)
-    monkeypatch.setattr(
-        ali_client,
-        "predict_landmarks",
-        lambda input_dir, tool_name, model_name, landmarks, work_dir: {
-            "patient1": predicted
-        },
-    )
-    output_dir = ASOLogic.main(
-        input=str(root),
-        modality="CBCT",
-        automation="Fully-Automated",
-        reference=_cbct_reference(tmp_path),
+    output_dir = _run_aso(
+        tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+        modality="CBCT", automation="Fully-Automated",
         landmark_models="CBCT_landmark_models_ALI",
-        cbct_landmarks=Selection({name: True for name in _REFERENCE_POINTS}),
+        cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
     )
-    assert _report(output_dir)["patients"]["patient1"]["status"] == "ok"
+    report = _report(output_dir)
+    assert report["patients"]["patient1"]["status"] == "ok"
+    assert report["landmark_source"] == dispatch.LANDMARK_TOOL
 
 
-def test_the_landmark_tool_is_never_imported_at_module_level():
-    """registry.py imports every tool at startup; a module-level import of the
-    registry would be a cycle, and one of torch would stop the server booting."""
-    source = open(ali_client.__file__).read()
-    header = source.split("def ", 1)[0]
-    assert "from registry" not in header and "import torch" not in header
+def test_the_landmark_tool_is_asked_by_name_for_the_points_aso_needs(tmp_path):
+    """By NAME, not by region: ASO's seven points straddle two of the landmark
+    tool's regions, so asking by region would run 58 agents to use 7 -- and one
+    agent is a full two-scale walk of the volume."""
+    root = tmp_path / "input"
+    _write_scan(root / "patient1_scan.nii.gz")
+    sup = FakeSup({"patient1": _predicted()}, tmp_path)
+
+    _run_aso(
+        tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+        modality="CBCT", automation="Fully-Automated",
+        landmark_models="/data/ALI/models/Bundle",
+        cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
+    )
+
+    assert len(sup.calls) == 1
+    tool, params = sup.calls[0]
+    # A string, not a dynamic attribute: a typo here is greppable, and the call
+    # graph stays inspectable.
+    assert tool == "ALI"
+    assert set(params["landmarks"]) == set(_REFERENCE_POINTS)
+    assert params["model"] == "/data/ALI/models/Bundle"
+    assert "cbct_regions" not in params
+
+
+def test_the_landmark_tool_is_run_on_the_recentred_scans(tmp_path):
+    """The ordering that made the supervisor necessary at all.
+
+    The Slicer chain ran PRE_ASO_CBCT before ALI_CBCT, so the landmark tool has
+    always seen centred volumes. Recentring is a pure metadata change and this
+    *ought* to be reorderable -- but ALI takes the absolute value of the origin
+    (issue #11), so it is kept exactly as it was rather than bet on.
+    """
+    root = tmp_path / "input"
+    _write_scan(root / "patient1_scan.nii.gz")
+    sup = FakeSup({"patient1": _predicted()}, tmp_path)
+
+    _run_aso(
+        tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+        modality="CBCT", automation="Fully-Automated",
+        landmark_models="Bundle", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
+    )
+
+    _tool, params = sup.calls[0]
+    assert len(sup.sent) == 1
+    sent = sup.sent[0]
+    centre = np.array(
+        sent.TransformContinuousIndexToPhysicalPoint(
+            (np.array(sent.GetSize()) / 2.0).tolist()
+        )
+    )
+    # What it was handed is centred on the physical origin, not the original.
+    assert np.allclose(centre, 0.0, atol=1e-6)
+    assert str(params["input"]) != str(root)
+
+
+def test_supplied_landmarks_need_no_supervisor(tmp_path):
+    """The standalone case: run the landmark tool yourself, pass the folder.
+
+    This is what makes the tool usable from a notebook with nothing but its own
+    venv -- no repository checkout, no server, no supervisor.
+    """
+    root = tmp_path / "input"
+    _write_scan(root / "patient1_scan.nii.gz")
+    supplied = tmp_path / "landmarks"
+    _write_markups(supplied / "patient1_lm_Pred.mrk.json", _predicted())
+
+    output_dir = _run_aso(
+        tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+        modality="CBCT", automation="Fully-Automated",
+        landmarks=str(supplied), cbct_landmarks=list(_REFERENCE_POINTS),
+    )
+    report = _report(output_dir)
+    assert report["patients"]["patient1"]["status"] == "ok"
+    assert report["landmark_source"] == "supplied"
+
+
+def test_supplied_landmarks_win_over_the_supervisor(tmp_path):
+    """Passing what you already have must not spend a GPU re-predicting it."""
+    root = tmp_path / "input"
+    _write_scan(root / "patient1_scan.nii.gz")
+    supplied = tmp_path / "landmarks"
+    _write_markups(supplied / "patient1_lm_Pred.mrk.json", _predicted())
+    sup = FakeSup({"patient1": _predicted()}, tmp_path)
+
+    _run_aso(
+        tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
+        modality="CBCT", automation="Fully-Automated",
+        landmarks=str(supplied), cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
+    )
+    assert sup.calls == []
+
+
+def test_the_supervisor_is_never_imported(tmp_path):
+    """It is duck-typed on purpose: importing a supervisor type would need a
+    package shared with the server, which is the coupling the split removes."""
+    source = open(dispatch.__file__).read()
+    assert "import sup" not in source
+    assert "supervisor import" not in source
 
 
 # ---------------------------------------------------------------------------
@@ -974,12 +981,12 @@ def test_semi_automated_cbct_from_dicom_end_to_end(tmp_path):
         root / "patient1_lm.mrk.json",
         _rotate(_REFERENCE_POINTS, (0.2, 1.0, 0.3), 15.0, offset=(6.0, -4.0, 3.0)),
     )
-    output_dir = ASOLogic.main(
+    output_dir = _run_aso(tmp_path, 
         input=str(root),
         modality="CBCT",
         automation="Semi-Automated",
         reference=_cbct_reference(tmp_path),
-        cbct_landmarks=Selection({name: True for name in _REFERENCE_POINTS}),
+        cbct_landmarks=list(_REFERENCE_POINTS),
         dicom_input=True,
     )
     assert _report(output_dir)["patients"]["patient1"]["status"] == "ok"
@@ -988,7 +995,7 @@ def test_semi_automated_cbct_from_dicom_end_to_end(tmp_path):
 
 def dicom_module():
     """Imported through a function so the DICOM tests state the seam explicitly."""
-    from tools.ASO.src.cbct import dicom
+    from sadt_aso.cbct import dicom
 
     return dicom
 
@@ -1063,14 +1070,14 @@ def test_every_accepted_label_array_name_works(tmp_path, array_name):
 def test_fully_automated_ios_end_to_end(tmp_path):
     """Tooth centroids in, both jaws oriented, one transform each."""
     _ios_case(tmp_path / "input")
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(tmp_path / "input"),
         reference_path=_ios_reference(tmp_path),
         modality=catalogs.MODALITY_IOS,
         automation=catalogs.AUTOMATION_FULLY,
         ios_teeth=catalogs.DEFAULT_TEETH,
         ios_jaws=["Upper", "Lower"],
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     entry = run.report["patients"]["P1"]
     assert entry["status"] == "ok"
@@ -1085,7 +1092,7 @@ def test_fully_automated_ios_end_to_end(tmp_path):
 def test_semi_automated_ios_end_to_end(tmp_path):
     """Landmarks in, meshes AND landmarks come back oriented."""
     _ios_case(tmp_path / "input", with_markups=True)
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(tmp_path / "input"),
         reference_path=_ios_reference(tmp_path, with_surfaces=False, with_markups=True),
         modality=catalogs.MODALITY_IOS,
@@ -1093,7 +1100,7 @@ def test_semi_automated_ios_end_to_end(tmp_path):
         ios_teeth=catalogs.DEFAULT_TEETH,
         ios_landmark_types=["O"],
         ios_jaws=["Upper", "Lower"],
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     entry = run.report["patients"]["P1"]
     assert entry["status"] == "ok"
@@ -1110,15 +1117,15 @@ def test_unsegmented_meshes_are_refused_with_the_array_names(tmp_path):
     mesh.SetPoints(points)
     surfaces.write_surface(mesh, str(tmp_path / "input" / "P1_U_Seg.vtk"))
 
-    with pytest.raises(ToolArgumentError) as raised:
-        ASOLogic.orient(
+    with pytest.raises(ToolInputError) as raised:
+        dispatch.orient(
             input_path=str(tmp_path / "input"),
             reference_path=_ios_reference(tmp_path),
             modality=catalogs.MODALITY_IOS,
             automation=catalogs.AUTOMATION_FULLY,
             ios_teeth=catalogs.DEFAULT_TEETH,
             ios_jaws=["Upper"],
-            scratch_dir=str(tmp_path / "scratch"),
+            output_dir=str(tmp_path / "out"),
         )
     for name in markups.LABEL_ARRAY_NAMES:
         assert name in str(raised.value)
@@ -1137,14 +1144,14 @@ def test_a_mixed_batch_processes_what_it_can(tmp_path):
     bad.SetPoints(points)
     surfaces.write_surface(bad, str(root / "bad_U_Seg.vtk"))
 
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(root),
         reference_path=_ios_reference(tmp_path),
         modality=catalogs.MODALITY_IOS,
         automation=catalogs.AUTOMATION_FULLY,
         ios_teeth=catalogs.DEFAULT_TEETH,
         ios_jaws=["Upper"],
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     assert run.report["patients"]["good"]["status"] == "ok"
     assert run.report["patients"]["bad"]["status"] == "failed"
@@ -1154,7 +1161,7 @@ def test_a_mixed_batch_processes_what_it_can(tmp_path):
 def test_occlusion_moves_both_jaws_with_one_transform(tmp_path):
     """The point of the mode: two meshes in occlusion stay in occlusion."""
     _ios_case(tmp_path / "input")
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(tmp_path / "input"),
         reference_path=_ios_reference(tmp_path),
         modality=catalogs.MODALITY_IOS,
@@ -1162,7 +1169,7 @@ def test_occlusion_moves_both_jaws_with_one_transform(tmp_path):
         ios_teeth=catalogs.DEFAULT_TEETH,
         ios_jaws=["Upper", "Lower"],
         ios_occlusion=catalogs.OCCLUSION_UPPER_DRIVES,
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     entry = run.report["patients"]["P1"]
     assert entry["jaws"]["Lower"]["registered_on"] == "the Upper jaw's transform"
@@ -1196,8 +1203,8 @@ def test_a_missing_tooth_fails_that_jaw_with_its_name(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_fewer_than_three_cbct_landmarks_is_refused(tmp_path):
-    with pytest.raises(ToolArgumentError) as raised:
-        ASOLogic.main(
+    with pytest.raises(ToolInputError) as raised:
+        _run_aso(tmp_path, 
             input=str(tmp_path), modality="CBCT", automation="Semi-Automated",
             reference=str(tmp_path), cbct_landmarks={"Ba": True, "S": True},
         )
@@ -1205,8 +1212,8 @@ def test_fewer_than_three_cbct_landmarks_is_refused(tmp_path):
 
 
 def test_fully_automated_ios_needs_three_or_four_teeth_per_jaw(tmp_path):
-    with pytest.raises(ToolArgumentError) as raised:
-        ASOLogic.main(
+    with pytest.raises(ToolInputError) as raised:
+        _run_aso(tmp_path, 
             input=str(tmp_path), modality="IOS", automation="Fully-Automated",
             reference=str(tmp_path),
             ios_teeth={"UR6": True, "UL6": True},
@@ -1218,11 +1225,11 @@ def test_fully_automated_ios_needs_three_or_four_teeth_per_jaw(tmp_path):
 def test_a_driving_jaw_must_be_selected(tmp_path):
     """The original carried an `occlusion` boolean and a `jaw` string that could
     contradict each other; one argument cannot."""
-    with pytest.raises(ToolArgumentError) as raised:
-        ASOLogic.main(
+    with pytest.raises(ToolInputError) as raised:
+        _run_aso(tmp_path, 
             input=str(tmp_path), modality="IOS", automation="Fully-Automated",
             reference=str(tmp_path),
-            ios_jaws={"Upper": False, "Lower": True},
+            ios_jaws=["Lower"],
             ios_occlusion=catalogs.OCCLUSION_UPPER_DRIVES,
         )
     assert "not selected in 'ios_jaws'" in str(raised.value)
@@ -1230,8 +1237,8 @@ def test_a_driving_jaw_must_be_selected(tmp_path):
 
 def test_output_suffix_cannot_be_a_path(tmp_path):
     """It becomes part of every output file name."""
-    with pytest.raises(ToolArgumentError):
-        ASOLogic.main(
+    with pytest.raises(ToolInputError):
+        _run_aso(tmp_path, 
             input=str(tmp_path), modality="CBCT", automation="Semi-Automated",
             reference=str(tmp_path), output_suffix="../escape",
         )
@@ -1251,14 +1258,14 @@ def test_a_selection_the_reference_cannot_support_is_refused_once(tmp_path):
     )
     _cbct_case(tmp_path / "input")
 
-    with pytest.raises(ToolArgumentError) as raised:
-        ASOLogic.orient(
+    with pytest.raises(ToolInputError) as raised:
+        dispatch.orient(
             input_path=str(tmp_path / "input"),
             reference_path=occlusal,
             modality=catalogs.MODALITY_CBCT,
             automation=catalogs.AUTOMATION_SEMI,
             cbct_landmarks=list(catalogs.DEFAULT_CBCT_LANDMARKS),
-            scratch_dir=str(tmp_path / "scratch"),
+            output_dir=str(tmp_path / "out"),
         )
     message = str(raised.value)
     # It names what the reference actually offers, so the fix is one step away.
@@ -1281,13 +1288,13 @@ def test_the_matching_selection_runs_against_the_same_reference(tmp_path):
     _write_markups(os.path.join(occlusal, "UP01_Or.mrk.json"), points)
     _cbct_case(tmp_path / "input", points=points)
 
-    run = ASOLogic.orient(
+    run = dispatch.orient(
         input_path=str(tmp_path / "input"),
         reference_path=occlusal,
         modality=catalogs.MODALITY_CBCT,
         automation=catalogs.AUTOMATION_SEMI,
         cbct_landmarks=list(points),
-        scratch_dir=str(tmp_path / "scratch"),
+        output_dir=str(tmp_path / "out"),
     )
     assert run.report["patients"]["patient1"]["status"] == "ok"
     assert run.report["reference_landmarks"] == sorted(points)
@@ -1295,13 +1302,13 @@ def test_the_matching_selection_runs_against_the_same_reference(tmp_path):
 
 def test_an_empty_input_says_what_was_expected(tmp_path):
     (tmp_path / "input").mkdir()
-    with pytest.raises(ToolArgumentError) as raised:
-        ASOLogic.orient(
+    with pytest.raises(ToolInputError) as raised:
+        dispatch.orient(
             input_path=str(tmp_path / "input"),
             reference_path=_cbct_reference(tmp_path),
             modality=catalogs.MODALITY_CBCT,
             automation=catalogs.AUTOMATION_SEMI,
-            scratch_dir=str(tmp_path / "scratch"),
+            output_dir=str(tmp_path / "out"),
         )
     assert ".nii.gz" in str(raised.value)
 
@@ -1314,24 +1321,24 @@ def test_main_returns_a_directory_with_the_report_and_no_intermediates(tmp_path)
     """main.py zips whatever comes back and names the archive after it, so the
     working copies must be gone by then."""
     _cbct_case(tmp_path / "input")
-    output_dir = ASOLogic.main(
+    output_dir = _run_aso(tmp_path, 
         input=str(tmp_path / "input"),
         modality="CBCT",
         automation="Semi-Automated",
         reference=_cbct_reference(tmp_path),
-        cbct_landmarks=Selection({name: True for name in _REFERENCE_POINTS}),
+        cbct_landmarks=list(_REFERENCE_POINTS),
         output_suffix="Or",
     )
-    assert os.path.basename(output_dir) == "ASO_Or"
-    assert os.path.isfile(os.path.join(output_dir, ASOLogic.REPORT_NAME))
-    scratch = os.path.dirname(output_dir)
-    for intermediate in ("input_extracted", "reference_extracted", "centered"):
-        assert not os.path.exists(os.path.join(scratch, intermediate))
+    assert os.path.isfile(os.path.join(output_dir, dispatch.REPORT_NAME))
+    # A surviving working directory means a run crashed, so it has to be gone
+    # whatever happened -- and it is INSIDE output_dir, which the caller keeps.
+    assert not os.path.exists(os.path.join(output_dir, dispatch.WORK_DIRNAME))
 
 
-def test_a_zipped_input_is_extracted_by_the_tool(tmp_path):
-    """The `input` argument leads with a FILE type, so a .zip reaches run() as
-    an archive -- exactly like AMASSS's."""
+def test_an_archive_is_not_unpacked_here(tmp_path):
+    """No tool handles `.zip` any more: the server unpacks before `run()` is
+    called, with the bomb cap and the single-root strip that used to live in
+    `_as_directory`. A tool that still tried would be applying neither."""
     import zipfile
 
     _cbct_case(tmp_path / "cohort")
@@ -1340,15 +1347,17 @@ def test_a_zipped_input_is_extracted_by_the_tool(tmp_path):
         for name in os.listdir(tmp_path / "cohort"):
             zf.write(os.path.join(tmp_path / "cohort", name), os.path.join("cohort", name))
 
-    run = ASOLogic.orient(
-        input_path=archive,
-        reference_path=_cbct_reference(tmp_path),
-        modality=catalogs.MODALITY_CBCT,
-        automation=catalogs.AUTOMATION_SEMI,
-        cbct_landmarks=list(_REFERENCE_POINTS),
-        scratch_dir=str(tmp_path / "scratch"),
-    )
-    assert run.report["patients"]["patient1"]["status"] == "ok"
+    # Linked into a directory of its own and then found to hold no scan, which
+    # is exactly what a stray file of any other kind would do.
+    with pytest.raises(ToolInputError, match="No CBCT scan found"):
+        dispatch.orient(
+            input_path=archive,
+            reference_path=_cbct_reference(tmp_path),
+            modality=catalogs.MODALITY_CBCT,
+            automation=catalogs.AUTOMATION_SEMI,
+            cbct_landmarks=list(_REFERENCE_POINTS),
+            output_dir=str(tmp_path / "out"),
+        )
 
 
 def test_a_single_uploaded_file_does_not_drag_in_its_neighbours(tmp_path):
@@ -1359,7 +1368,7 @@ def test_a_single_uploaded_file_does_not_drag_in_its_neighbours(tmp_path):
     _write_scan(work_dir / "input.nii.gz")
     (work_dir / "reference.zip").write_bytes(b"not a real archive")
 
-    root = ASOLogic._as_directory(
+    root = dispatch._as_directory(
         str(work_dir / "input.nii.gz"), str(tmp_path / "scratch" / "input_extracted")
     )
     assert sorted(os.listdir(root)) == ["input.nii.gz"]

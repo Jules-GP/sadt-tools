@@ -17,16 +17,11 @@ import os
 import numpy as np
 import SimpleITK as sitk
 
-import file_utils
-
 from .. import markups
+from ..scans import SCAN_EXTENSIONS, compressed_extension, split_scan_extension
 from . import icp
 
-logger = logging.getLogger("ASO")
-
-SCAN_EXTENSIONS = file_utils.SCAN_EXTENSIONS
-split_scan_extension = file_utils.split_scan_extension
-compressed_extension = file_utils.compressed_extension
+logger = logging.getLogger(__name__)
 
 # Suffixes previous runs (of ASO, AMASSS or ALI) leave on a file name, stripped
 # to recover the patient they belong to. Longest first so "_Scanreg" is not cut

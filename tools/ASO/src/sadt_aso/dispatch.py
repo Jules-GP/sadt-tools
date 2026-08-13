@@ -7,7 +7,8 @@ engines, four modes:
 |            | Semi-Automated                        | Fully-Automated                       |
 |------------|---------------------------------------|---------------------------------------|
 | **CBCT**   | landmarks you send, ICP onto a gold   | landmarks predicted first (see        |
-|            | landmark set                          | `ali_client`), then the same ICP      |
+|            | landmark set                          | `_predict_landmarks`), then the same  |
+|            |                                       | ICP                                   |
 | **IOS**    | landmarks you send, ICP per jaw       | tooth centroids of an already         |
 |            |                                       | segmented mesh, ICP per jaw           |
 
@@ -16,42 +17,46 @@ The Slicer envelope is gone entirely: no `<filter-progress>` prints, no
 `*Error.txt` beside the results, and nothing written into the caller's input
 tree.
 
-Two entry points, for the same reason AMASSS has two:
+**Fully-automated CBCT calls another tool, and calls it from the middle.** The
+landmark tool runs on the RECENTRED scans -- that is what the Slicer chain did,
+`PRE_ASO_CBCT` before `ALI_CBCT` -- so it cannot be run before ASO and its
+result handed in. The recentring is a pure metadata change, so it *ought* to be
+reorderable, and it very nearly is; `ALI`'s `physical_position` takes the
+absolute value of the origin, which does not commute with moving it (see issue
+#11). Rather than bet on that, the order is kept exactly as it was and the
+landmark tool is reached through the supervisor, at the point it always ran.
 
-* `orient(...)` -> `OrientationRun`, the real API. Returns the output directory
-  plus a structured report, with no zip round trip. This is what other
-  server-side tools call.
-* `main(...)` -> the output directory's path. The thin schema adapter used by
-  `ASO.py`; main.py zips that directory, so no zip code lives here.
+`sup` is keyword-only and unannotated, which is what marks it as the supervisor
+rather than an argument: `describe.py` keeps it out of the schema, and a client
+never sends it. It is duck-typed -- nothing here imports a supervisor type,
+because doing so would need a package shared with the server, which is the
+coupling this repository exists to remove.
 """
 
 import json
 import logging
 import os
 import shutil
-import sys
-import zipfile
 
-import file_utils
-from base import ToolArgumentError
-from config import settings
-
-from . import ali_client, catalogs
+from . import catalogs
 from .cbct import dicom
 from .cbct import pipeline as cbct_pipeline
+from .errors import SupervisorRequired, ToolInputError
 from .ios import pipeline as ios_pipeline
 
-logger = logging.getLogger("ASO")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
+logger = logging.getLogger(__name__)
 
 REPORT_NAME = "ASO_report.json"
+
+# Intermediates live here, under the output directory the caller owns, and are
+# removed before `orient` returns. A surviving `.aso_work/` means a run crashed.
+WORK_DIRNAME = ".aso_work"
+
+# The tool asked for the landmarks of a fully-automated CBCT run. A string, not
+# a dynamic attribute on the supervisor: a typo in a string is greppable and
+# the call graph stays inspectable, where `sup.ALI(...)` is an AttributeError
+# fifteen minutes into a job.
+LANDMARK_TOOL = "ALI"
 
 
 class OrientationRun:
@@ -87,12 +92,13 @@ class OrientationRun:
 
 
 # ---------------------------------------------------------------------------
-# The reusable API
+# Entry point
 # ---------------------------------------------------------------------------
 
 def orient(
     input_path: str,
     reference_path: str,
+    output_dir: str,
     modality: str,
     automation: str,
     cbct_landmarks=None,
@@ -100,68 +106,97 @@ def orient(
     ios_landmark_types=None,
     ios_jaws=None,
     ios_occlusion: str = catalogs.OCCLUSION_INDEPENDENT,
-    landmark_models: str = None,
+    landmarks_path: str = "",
+    landmark_models: str = "",
     dicom_input: bool = False,
     output_suffix: str = "Or",
-    scratch_dir: str = None,
-    max_triplets: int = None,
-    seed: int = None,
+    max_triplets: int = 2500,
+    seed: int = 0,
+    sup=None,
 ) -> OrientationRun:
     """Orient every case under `input_path` onto `reference_path`.
 
-    `input_path` and `reference_path` are each a file, a `.zip`, or a directory.
-    Selections are sequences of the names declared in `catalogs`.
+    Every cross-argument rule is checked BEFORE any file is read: a request that
+    cannot work has to come back in a second, not after minutes of registration.
     """
-    scratch_dir = scratch_dir or file_utils.make_scratch_dir("ASO_")
-    max_triplets = settings.ASO_ICP_MAX_TRIPLETS if max_triplets is None else max_triplets
-    seed = settings.ASO_ICP_SEED if seed is None else seed
+    modality, automation = str(modality), str(automation)
+    occlusion = str(ios_occlusion or catalogs.OCCLUSION_INDEPENDENT)
+    suffix = (output_suffix or "Or").strip() or "Or"
+    if os.sep in suffix or (os.altsep and os.altsep in suffix):
+        raise ToolInputError("'output_suffix' is a name fragment, not a path.")
 
-    output_dir = os.path.join(scratch_dir, f"ASO_{output_suffix}")
+    if modality == catalogs.MODALITY_CBCT:
+        requested = _selected(cbct_landmarks, catalogs.CBCT_LANDMARK_CHOICES, "cbct_landmarks")
+        _check_cbct(automation, requested, landmarks_path, landmark_models, sup)
+        selection = {"cbct_landmarks": requested}
+    elif modality == catalogs.MODALITY_IOS:
+        teeth = _selected(ios_teeth, catalogs.TOOTH_CHOICES, "ios_teeth")
+        types = _selected(
+            ios_landmark_types, catalogs.IOS_LANDMARK_TYPE_CHOICES, "ios_landmark_types"
+        )
+        jaws = _selected(ios_jaws, catalogs.JAW_CHOICES, "ios_jaws")
+        _check_ios(automation, teeth, types, jaws, occlusion)
+        selection = {"ios_teeth": teeth, "ios_landmark_types": types, "ios_jaws": jaws}
+    else:
+        raise ToolInputError(
+            f"Unknown 'modality' {modality!r}. Expected one of: "
+            f"{', '.join(catalogs.MODALITY_CHOICES)}"
+        )
+
+    output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
-
-    input_root = _as_directory(input_path, os.path.join(scratch_dir, "input_extracted"))
-    reference_root = _as_directory(
-        reference_path, os.path.join(scratch_dir, "reference_extracted")
-    )
+    work_dir = os.path.join(output_dir, WORK_DIRNAME)
+    os.makedirs(work_dir, exist_ok=True)
 
     report = {
         "modality": modality,
         "automation": automation,
-        "output_suffix": output_suffix,
+        "output_suffix": suffix,
         "reference": os.path.basename(str(reference_path).rstrip(os.sep)),
         "patients": {},
     }
 
-    if modality == catalogs.MODALITY_CBCT:
-        _run_cbct(
-            input_root=input_root,
-            reference_root=reference_root,
-            automation=automation,
-            requested=list(cbct_landmarks or ()),
-            landmark_models=landmark_models,
-            dicom_input=dicom_input,
-            output_dir=output_dir,
-            scratch_dir=scratch_dir,
-            suffix=output_suffix,
-            max_triplets=max_triplets,
-            seed=seed,
-            report=report,
-        )
-    else:
-        _run_ios(
-            input_root=input_root,
-            reference_root=reference_root,
-            automation=automation,
-            teeth=list(ios_teeth or ()),
-            landmark_types=list(ios_landmark_types or ()),
-            jaws=list(ios_jaws or ()),
-            occlusion=ios_occlusion,
-            output_dir=output_dir,
-            suffix=output_suffix,
-            max_triplets=max_triplets,
-            seed=seed,
-            report=report,
-        )
+    try:
+        input_root = _as_directory(input_path, os.path.join(work_dir, "input"))
+        reference_root = _as_directory(reference_path, os.path.join(work_dir, "reference"))
+
+        if modality == catalogs.MODALITY_CBCT:
+            _run_cbct(
+                input_root=input_root,
+                reference_root=reference_root,
+                automation=automation,
+                requested=selection["cbct_landmarks"],
+                landmarks_path=landmarks_path,
+                landmark_models=landmark_models,
+                dicom_input=dicom_input,
+                output_dir=output_dir,
+                work_dir=work_dir,
+                suffix=suffix,
+                max_triplets=max_triplets,
+                seed=seed,
+                report=report,
+                sup=sup,
+            )
+        else:
+            _run_ios(
+                input_root=input_root,
+                reference_root=reference_root,
+                automation=automation,
+                teeth=selection["ios_teeth"],
+                landmark_types=selection["ios_landmark_types"],
+                jaws=selection["ios_jaws"],
+                occlusion=occlusion,
+                output_dir=output_dir,
+                suffix=suffix,
+                max_triplets=max_triplets,
+                seed=seed,
+                report=report,
+            )
+    finally:
+        # Extracted inputs, converted DICOM, the centred volumes and whatever
+        # the landmark tool wrote. Removed whether or not the run succeeded, so
+        # what is left under output_dir is results and nothing else.
+        shutil.rmtree(work_dir, ignore_errors=True)
 
     _summarize(report)
     with open(os.path.join(output_dir, REPORT_NAME), "w") as handle:
@@ -171,110 +206,58 @@ def orient(
 
 
 # ---------------------------------------------------------------------------
-# The schema adapter
-# ---------------------------------------------------------------------------
-
-def main(
-    input,
-    modality,
-    automation,
-    reference,
-    landmark_models=None,
-    cbct_landmarks=None,
-    ios_teeth=None,
-    ios_landmark_types=None,
-    ios_jaws=None,
-    ios_occlusion=None,
-    dicom_input=False,
-    output_suffix="Or",
-) -> str:
-    """Translate the schema's arguments into `orient()` and return its output
-    directory, which main.py zips and streams.
-
-    Every cross-argument rule is checked HERE, before any file is read: a
-    request that cannot work must come back as a 422 in a second, not after
-    minutes of registration.
-    """
-    modality, automation = str(modality), str(automation)
-    occlusion = str(ios_occlusion or catalogs.OCCLUSION_INDEPENDENT)
-    suffix = (output_suffix or "Or").strip() or "Or"
-    if os.sep in suffix or (os.altsep and os.altsep in suffix):
-        raise ToolArgumentError("'output_suffix' is a name fragment, not a path.")
-
-    if modality == catalogs.MODALITY_CBCT:
-        landmarks = _selected(cbct_landmarks, catalogs.CBCT_LANDMARK_CHOICES)
-        _check_cbct(automation, landmarks)
-        selection = {"cbct_landmarks": landmarks}
-    else:
-        teeth = _selected(ios_teeth, catalogs.TOOTH_CHOICES)
-        types = _selected(ios_landmark_types, catalogs.IOS_LANDMARK_TYPE_CHOICES)
-        jaws = _selected(ios_jaws, catalogs.JAW_CHOICES)
-        _check_ios(automation, teeth, types, jaws, occlusion)
-        selection = {"ios_teeth": teeth, "ios_landmark_types": types, "ios_jaws": jaws}
-
-    scratch_dir = file_utils.make_scratch_dir("ASO_")
-    run = orient(
-        input_path=str(input),
-        reference_path=str(reference),
-        modality=modality,
-        automation=automation,
-        ios_occlusion=occlusion,
-        landmark_models=str(landmark_models) if landmark_models else None,
-        dicom_input=bool(dicom_input),
-        output_suffix=suffix,
-        scratch_dir=scratch_dir,
-        **selection,
-    )
-
-    # The archive should hold results, not the working copies they came from.
-    for intermediate in ("input_extracted", "reference_extracted", "dicom_nifti", "centered"):
-        shutil.rmtree(os.path.join(scratch_dir, intermediate), ignore_errors=True)
-    return run.output_dir
-
-
-# ---------------------------------------------------------------------------
 # Argument rules
 # ---------------------------------------------------------------------------
 
-def _selected(value, choices: dict) -> list:
-    """The enabled options of a multichoice argument, in declaration order.
+def _selected(value, choices: dict, argument: str) -> list:
+    """A multichoice argument's value, in declaration order.
 
-    Accepts the `Selection` validate() produces, a plain dict, or a sequence --
-    so `orient()` can be called directly with `["Ba", "S", "N"]`.
+    None means the argument was omitted and its declared defaults apply. An
+    unknown name raises rather than being dropped: `Literal` is published, not
+    enforced -- the runner calls `run(**params)` from a JSON object -- so a
+    stale client naming an option that no longer exists must be told, not handed
+    a narrower run than it asked for.
     """
     if value is None:
         return [name for name, on in choices.items() if on]
-    if isinstance(value, dict):
-        return [name for name in choices if value.get(name)]
+    unknown = sorted(set(value) - set(choices))
+    if unknown:
+        raise ToolInputError(
+            f"Unknown option(s) in '{argument}': {', '.join(unknown)}. "
+            f"Known: {', '.join(choices)}."
+        )
     wanted = set(value)
     return [name for name in choices if name in wanted]
 
 
-def _check_cbct(automation: str, landmarks: list) -> None:
+def _check_cbct(
+    automation: str, landmarks: list, landmarks_path: str, landmark_models: str, sup
+) -> None:
     if len(landmarks) < 3:
-        raise ToolArgumentError(
+        raise ToolInputError(
             f"CBCT orientation registers on at least 3 landmarks; "
             f"{len(landmarks)} are selected in 'cbct_landmarks'."
         )
-    if automation != catalogs.AUTOMATION_FULLY:
+    if automation != catalogs.AUTOMATION_FULLY or landmarks_path:
         return
-    # The landmark tool is checked before the input is even extracted. Neither
-    # order changes what fails, but this one changes what the caller is told:
-    # with the tool absent, "deploy ALI or use Semi-Automated" is the answer
+
+    # Checked before the input is even read. Neither order changes what fails,
+    # but this one changes what the caller is told: with no way to reach the
+    # landmark tool, "send landmarks or use Semi-Automated" is the answer
     # whatever they put in 'landmark_models'.
-    #
-    # 'landmark_models' itself is NOT checked here any more. It is optional:
-    # omitted, the landmark tool picks the bundle matching the input from its
-    # OWN hosted models (ALILogic.select_bundle), which is both the right
-    # default and the only one a client can express -- a combo box selects its
-    # first entry the moment it is filled, so "name a bundle or else" made the
-    # first entry of a list ASO does not control into the de-facto answer. That
-    # list is DATA/ASO/models/, which holds the reference bundles too, so the
-    # de-facto answer was routinely a reference: 'No CBCT landmark weights
-    # found in CBCT_Gold_Frankfurt_Horizontal_Midsagittal_Plane'.
-    if not ali_client.is_available(settings.ASO_LANDMARK_TOOL):
-        raise ToolArgumentError(
-            ali_client._NOT_AVAILABLE.format(tool=settings.ASO_LANDMARK_TOOL)
+    if sup is None:
+        raise SupervisorRequired(
+            f"Fully-Automated CBCT predicts the landmarks with the '{LANDMARK_TOOL}' tool, "
+            f"and nothing here can run it: no supervisor was supplied. Send the landmarks "
+            f"yourself in 'landmarks' (a folder of .mrk.json files, which is what "
+            f"'{LANDMARK_TOOL}' produces), or use Semi-Automated mode."
+        )
+    if not landmark_models:
+        raise ToolInputError(
+            f"Fully-Automated CBCT needs 'landmark_models': the model bundle "
+            f"'{LANDMARK_TOOL}' predicts with. It used to be optional because the server "
+            f"picked a bundle matching the input; a tool no longer resolves paths, so the "
+            f"bundle has to be named."
         )
 
 
@@ -293,7 +276,7 @@ def _no_landmarks_reason(key: str, markups_paths: list, orphans: list) -> str:
         names = ", ".join(sorted(os.path.basename(path) for path in markups_paths))
         return (
             f"the landmark file(s) found for this scan ({names}) hold no usable "
-            f"control point -- check the server log for the file that was skipped"
+            f"control point -- check the log for the file that was skipped"
         )
     if orphans:
         return (
@@ -306,8 +289,8 @@ def _no_landmarks_reason(key: str, markups_paths: list, orphans: list) -> str:
     return (
         "no landmark file (.mrk.json) alongside this scan. Semi-Automated mode "
         "registers on landmarks you provide, so they must travel with the scans -- "
-        "send the whole FOLDER rather than the single scan file, or use "
-        "Fully-Automated mode to have them predicted"
+        "send the whole FOLDER rather than the single scan file, pass them in "
+        "'landmarks', or use Fully-Automated mode to have them predicted"
     )
 
 
@@ -323,14 +306,14 @@ def _check_selection_against_reference(requested: list, reference_landmarks: dic
     "0 usable landmarks" -- a batch of forty identical failures for one wrong
     choice made in one place.
 
-    The server cannot know which reference will be picked when it publishes
-    `choices`, but it knows both the moment the request arrives. So it says so
-    once, and names what the reference actually offers.
+    Nothing knows which reference will be picked when the schema is published,
+    but both are known the moment the call arrives. So it says so once, and
+    names what the reference actually offers.
     """
     usable = [name for name in requested if name in reference_landmarks]
     if len(usable) >= cbct_pipeline.icp.MIN_LANDMARKS:
         return
-    raise ToolArgumentError(
+    raise ToolInputError(
         f"Only {len(usable)} of the selected landmarks exist in this reference, and "
         f"{cbct_pipeline.icp.MIN_LANDMARKS} are needed. The reference defines: "
         f"{', '.join(sorted(reference_landmarks))}. Select landmarks from that list in "
@@ -340,15 +323,15 @@ def _check_selection_against_reference(requested: list, reference_landmarks: dic
 
 def _check_ios(automation: str, teeth: list, types: list, jaws: list, occlusion: str) -> None:
     if not jaws:
-        raise ToolArgumentError("Select at least one jaw in 'ios_jaws'.")
+        raise ToolInputError("Select at least one jaw in 'ios_jaws'.")
     if occlusion not in catalogs.DRIVING_JAW:
-        raise ToolArgumentError(
+        raise ToolInputError(
             f"Unknown 'ios_occlusion' mode '{occlusion}'. Expected one of: "
             f"{', '.join(catalogs.DRIVING_JAW)}"
         )
     driving = catalogs.DRIVING_JAW[occlusion]
     if driving and driving not in jaws:
-        raise ToolArgumentError(
+        raise ToolInputError(
             f"'ios_occlusion' asks the {driving} jaw to drive the other one, but "
             f"{driving} is not selected in 'ios_jaws'."
         )
@@ -363,7 +346,7 @@ def _check_ios(automation: str, teeth: list, types: list, jaws: list, occlusion:
         for jaw in registered:
             count = len(per_jaw[jaw])
             if count not in (3, 4):
-                raise ToolArgumentError(
+                raise ToolInputError(
                     f"Fully-Automated IOS aligns each jaw from 3 or 4 teeth spread "
                     f"across the arch; {count} are selected for the {jaw} jaw in "
                     f"'ios_teeth'."
@@ -371,14 +354,14 @@ def _check_ios(automation: str, teeth: list, types: list, jaws: list, occlusion:
         return
 
     if not types:
-        raise ToolArgumentError(
+        raise ToolInputError(
             "Semi-Automated IOS registers on landmarks; select at least one in "
             "'ios_landmark_types'."
         )
     keys = catalogs.landmark_keys_by_jaw(teeth, types)
     for jaw in registered:
         if len(keys[jaw]) < 3:
-            raise ToolArgumentError(
+            raise ToolInputError(
                 f"Semi-Automated IOS registers on at least 3 landmarks per jaw; "
                 f"the {jaw} jaw has {len(keys[jaw])} "
                 f"({len(per_jaw[jaw])} teeth x {len(types)} landmark types)."
@@ -386,17 +369,78 @@ def _check_ios(automation: str, teeth: list, types: list, jaws: list, occlusion:
 
 
 # ---------------------------------------------------------------------------
+# Calling the landmark tool
+# ---------------------------------------------------------------------------
+
+def _predict_landmarks(
+    centered_root: str, landmark_models: str, requested: list, work_dir: str, sup
+) -> dict:
+    """Predict landmarks for every centred scan, through the supervisor.
+
+    Returns `{patient key: {landmark: position}}`, keyed like
+    `cbct.pipeline.discover`. The results never touch the caller's input tree.
+
+    Asked for by NAME, not by region: ASO registers on seven landmarks
+    straddling two of the landmark tool's regions, so asking by region would run
+    58 agents to use 7 -- and one agent is a full two-scale walk of the volume.
+    """
+    output_dir = os.path.join(work_dir, "landmarks")
+
+    if sup is not None and hasattr(sup, "progress"):
+        sup.progress(0.2, f"predicting landmarks with {LANDMARK_TOOL}")
+
+    produced = sup.run(
+        LANDMARK_TOOL,
+        input=centered_root,
+        model=landmark_models,
+        output_dir=output_dir,
+        landmarks=list(requested),
+        prediction_ID="Pred",
+    )
+    # A tool returns a Path, or a dict of named ones. The landmark tool returns
+    # its output directory; a dict is accepted so a future one naming its
+    # outputs does not break the call.
+    if isinstance(produced, dict):
+        produced = next(iter(produced.values()))
+    return _collect(str(produced) if produced else output_dir)
+
+
+def _collect(output_dir: str) -> dict:
+    """Merge every markups file the landmark tool produced, per patient.
+
+    Keys mirror `cbct.pipeline.discover`: the patient's path relative to the
+    results root. The landmark tool may write one file per landmark GROUP, so
+    several files can belong to one patient and are merged.
+    """
+    from . import markups
+
+    predictions: dict = {}
+    for directory, _, file_names in os.walk(output_dir):
+        relative = os.path.relpath(directory, output_dir)
+        prefix = "" if relative == "." else relative
+        for file_name in sorted(file_names):
+            if not markups.is_markups_file(file_name) or file_name.startswith("."):
+                continue
+            key = os.path.join(prefix, cbct_pipeline.patient_stem(file_name))
+            try:
+                found = markups.load_landmarks(os.path.join(directory, file_name))
+            except (ValueError, OSError) as exc:
+                logger.warning("Skipping '%s': %s", file_name, exc)
+                continue
+            predictions.setdefault(key, {}).update(found)
+    return predictions
+
+
+# ---------------------------------------------------------------------------
 # Engines
 # ---------------------------------------------------------------------------
 
 def _run_cbct(
-    input_root, reference_root, automation, requested, landmark_models, dicom_input,
-    output_dir, scratch_dir, suffix, max_triplets, seed, report,
+    input_root, reference_root, automation, requested, landmarks_path, landmark_models,
+    dicom_input, output_dir, work_dir, suffix, max_triplets, seed, report, sup,
 ) -> None:
     if dicom_input:
-        input_root = dicom.convert_tree(
-            input_root, os.path.join(scratch_dir, "dicom_nifti")
-        )
+        input_root = dicom.convert_tree(input_root, os.path.join(work_dir, "dicom_nifti"))
 
     reference_landmarks = cbct_pipeline.load_reference(reference_root)
     report["requested_landmarks"] = list(requested)
@@ -404,10 +448,9 @@ def _run_cbct(
 
     patients = cbct_pipeline.discover(input_root, suffix)
     if not patients:
-        raise ToolArgumentError(
+        raise ToolInputError(
             "No CBCT scan found in the input. Expected one of "
-            f"{', '.join(cbct_pipeline.SCAN_EXTENSIONS)}, sent as a file or a "
-            f"zipped folder."
+            f"{', '.join(cbct_pipeline.SCAN_EXTENSIONS)}, sent as a file or a folder."
         )
 
     # After discovery, before a single scan is read: with nothing to orient,
@@ -415,23 +458,38 @@ def _run_cbct(
     # landmark selection first would bury it.
     _check_selection_against_reference(requested, reference_landmarks)
 
-    fully = automation == catalogs.AUTOMATION_FULLY
+    # A supplied landmark folder makes a fully-automated run behave like a
+    # semi-automated one: the points are the caller's, wherever they came from.
+    # That is what lets this tool be used standalone, with no supervisor and no
+    # repository checkout -- see README.md.
+    supplied = _as_directory(landmarks_path, os.path.join(work_dir, "landmarks_in")) \
+        if landmarks_path else None
+    fully = automation == catalogs.AUTOMATION_FULLY and supplied is None
+    report["landmark_source"] = (
+        LANDMARK_TOOL if fully else ("supplied" if supplied else "alongside the scans")
+    )
 
     # Landmark files that matched no scan. Collected even on a run that
     # succeeds: "39 of your 40 patients were oriented" and "the 40th one's
     # landmarks are in the folder under a name nothing matched" are the same
     # sentence, and only this makes the second half sayable.
-    orphans = (
-        [] if fully
-        else sorted(
+    # Landmarks that matched no scan. A supplied folder holds landmarks only,
+    # so `orphan_markups` -- which calls anything without a scan beside it an
+    # orphan -- would call all of them orphans; there, matching is by patient
+    # key against the scans that were actually found.
+    if fully:
+        orphans = []
+    elif supplied:
+        orphans = sorted(set(_collect(supplied)) - set(patients))
+    else:
+        orphans = sorted(
             os.path.basename(path)
             for paths in cbct_pipeline.orphan_markups(input_root, suffix).values()
             for path in paths
         )
-    )
     report["unmatched_markups"] = orphans
 
-    centered_root = os.path.join(scratch_dir, "centered")
+    centered_root = os.path.join(work_dir, "centered")
 
     # Phase 1 -- recentre. The landmark tool runs on centred scans (that is what
     # the Slicer chain did, PRE_ASO_CBCT before ALI_CBCT), so in fully-automated
@@ -461,23 +519,26 @@ def _run_cbct(
         }
 
     # Phase 2 -- landmarks, either the caller's (moved into the centred space)
-    # or predicted ones (already in it).
+    # or predicted ones (already in it, because the tool ran on the centred
+    # scans).
     if fully:
-        predictions = ali_client.predict_landmarks(
-            centered_root,
-            settings.ASO_LANDMARK_TOOL,
-            landmark_models,
-            requested,
-            scratch_dir,
+        predictions = _predict_landmarks(
+            centered_root, landmark_models, requested, work_dir, sup
         )
         for key, entry in prepared.items():
             entry["landmarks"] = predictions.get(key, {})
     else:
+        # Merged per patient, then moved into the centred space -- the landmarks
+        # describe the ORIGINAL volume, wherever they came from, and the
+        # registration compares them against a centred one.
+        by_patient = _collect(supplied) if supplied else None
         for key, entry in prepared.items():
-            entry["landmarks"] = cbct_pipeline.center_landmarks(
-                cbct_pipeline.load_landmarks(patients[key]["markups"]),
-                entry["translation"],
+            found = (
+                by_patient.get(key, {})
+                if by_patient is not None
+                else cbct_pipeline.load_landmarks(patients[key]["markups"])
             )
+            entry["landmarks"] = cbct_pipeline.center_landmarks(found, entry["translation"])
 
     # Phase 3 -- register and write.
     for key, entry in sorted(prepared.items()):
@@ -487,7 +548,11 @@ def _run_cbct(
                 "reason": (
                     "no predicted landmarks for this scan"
                     if fully
-                    else _no_landmarks_reason(key, patients[key]["markups"], orphans)
+                    else _no_landmarks_reason(
+                        key,
+                        [] if supplied else patients[key]["markups"],
+                        orphans,
+                    )
                 ),
             }
             continue
@@ -525,7 +590,7 @@ def _run_ios(
     patients = ios_pipeline.discover(input_root, suffix)
     patients = {key: entry for key, entry in patients.items() if _has_surface(entry)}
     if not patients:
-        raise ToolArgumentError(
+        raise ToolInputError(
             "No intra-oral mesh found in the input. Expected one of "
             f"{', '.join(ios_pipeline.surfaces.SURFACE_EXTENSIONS)}, named so a "
             f"token says which jaw it is (e.g. 'P1_U_Seg.vtk')."
@@ -569,14 +634,14 @@ _UNLABELLED = "carries no tooth labels"
 
 
 def _reject_if_nothing_was_labelled(patients: dict) -> None:
-    """Turn "not one of your meshes is segmented" into a 422.
+    """Turn "not one of your meshes is segmented" into an input error.
 
     The distinction matters, and only these two cases are treated differently.
     No labelled mesh at all means the caller chose the wrong mode, and saying so
-    is more use than an empty archive. Some meshes labelled and others not is a
-    data problem: those are recorded per patient and the rest of the batch is
-    kept, because "one of your forty meshes was bad" is not a reason to return
-    nothing.
+    is more use than an empty output folder. Some meshes labelled and others not
+    is a data problem: those are recorded per patient and the rest of the batch
+    is kept, because "one of your forty meshes was bad" is not a reason to
+    return nothing.
 
     Checked after the loop rather than before it, so no mesh is read twice: an
     unlabelled one fails the moment its label array is probed, before any
@@ -589,11 +654,11 @@ def _reject_if_nothing_was_labelled(patients: dict) -> None:
     ]
     if not reasons or not all(_UNLABELLED in reason for reason in reasons):
         return
-    raise ToolArgumentError(
+    raise ToolInputError(
         "Fully-Automated IOS orients a mesh by its tooth labels, and none of the "
         "meshes sent carries a per-point array named one of "
-        f"{', '.join(ios_pipeline.markups.LABEL_ARRAY_NAMES)}. Segment them first, "
-        "or use Semi-Automated mode with landmark files."
+        f"{', '.join(ios_pipeline.markups.LABEL_ARRAY_NAMES)}. Run 'Crown_Seg' over "
+        "them first, or use Semi-Automated mode with landmark files."
     )
 
 
@@ -604,22 +669,20 @@ def _reject_if_nothing_was_labelled(patients: dict) -> None:
 def _as_directory(path: str, destination: str) -> str:
     """A directory holding the input, whatever shape it arrived in.
 
-    A single uploaded file is linked into a directory of its own rather than
-    used from where it landed: main.py streams every upload of a request into
-    ONE work directory, so treating the file's parent as the input root would
-    make the reference archive part of the input.
+    No archive is unpacked here: the server extracts a `.zip` before `run()` is
+    called, with the bomb cap and the single-root strip this function used to
+    apply itself.
+
+    A single file is still linked into a directory of its own rather than used
+    from where it landed, because its neighbours are not necessarily part of the
+    same input -- a caller may well have staged the scan and the reference side
+    by side.
     """
     path = str(path)
     if os.path.isdir(path):
         return path
-
-    if zipfile.is_zipfile(path):
-        return file_utils.extract_zip(
-            path,
-            extract_dir=destination,
-            strip_single_root=True,
-            max_total_bytes=settings.MAX_EXTRACTED_MB * 1024 * 1024,
-        )
+    if not os.path.exists(path):
+        raise ToolInputError(f"Path not found: {os.path.basename(path)}")
 
     os.makedirs(destination, exist_ok=True)
     linked = os.path.join(destination, os.path.basename(path))

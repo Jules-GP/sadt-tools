@@ -110,6 +110,9 @@ Three things to build against:
   old `choice`). Absent `choices`, the value is free-form.
 - **`source_hash` is a sha256 of the tool's `src/`.** Cache schemas against it
   and regenerate when it moves; that is what it is for.
+- **`supervisor` is optional and means the tool can call another one.** Absent
+  on every tool that cannot, so nothing written before supervisors existed
+  changes. See §5.
 
 **Argument order is the signature's order.** Render forms in it.
 
@@ -260,19 +263,62 @@ already the convention.
 
 ## 5. Sequencing tools
 
-Tools do not call each other. Where the old server had one tool importing
-another, the server now chains them:
+Almost all sequencing is the server's: where one tool's output is another's
+input, the server chains them and neither tool knows the other exists.
 
 | Chain | Why | Handoff |
 |---|---|---|
-| `crownseg` → `ali` | ALI's IOS engine needs meshes carrying tooth labels. `ALILogic.ensure_segmented()` used to import CrownSeg directly. | CrownSeg's `run_report.json` has `segmented_meshes`: absolute paths of every mesh that now carries labels, whether this run produced them or found them already labelled. Feed those to ALI. |
-| `ali` → `aso` | ASO registers on landmarks ALI predicts. `aso/src/ali_client.py` used to call ALI through `registry.TOOLS`. | ALI's markups files (`*.mrk.json`). |
+| `Crown_Seg` → `ALI` | ALI's IOS engine needs meshes carrying tooth labels. `ALILogic.ensure_segmented()` used to import CrownSeg directly. | CrownSeg's `run_report.json` has `segmented_meshes`: absolute paths of every mesh that now carries labels, whether this run produced them or found them already labelled. Feed those to ALI. |
 
 CrownSeg passes an already-labelled mesh through untouched, so re-running the
-chain on mixed input is cheap and safe.
+chain on mixed input is cheap and safe. ALI refuses an unlabelled batch up front,
+naming `Crown_Seg`, rather than failing per mesh.
 
-**Neither ALI nor ASO is migrated yet**, so those two rows describe the target,
-not today.
+### The one chain that cannot be a chain
+
+**`ASO` fully-automated CBCT needs `ALI` from the middle of its own run.** It
+recentres each scan, predicts landmarks **on the centred volumes**, then
+registers — the order the Slicer chain used (`PRE_ASO_CBCT` before `ALI_CBCT`).
+Running ALI first and handing ASO the markups reorders those two steps.
+
+That reordering *ought* to be exact: recentring resamples onto a grid shifted by
+the same offset, so the voxel array is untouched and only the origin metadata
+moves. But ALI's `physical_position` takes `abs(origin / spacing)`, which does
+not commute with moving the origin — [issue #11]. Rather than bet a clinical
+result on it, ASO calls ALI where it always ran.
+
+So ASO takes a **supervisor**, and this is the piece the server does not have
+yet:
+
+```python
+predictions = sup.run("ALI", input=centered_root, model=bundle, output_dir=..., landmarks=[...])
+```
+
+What the server has to provide:
+
+- an object with five members — `run(tool, **params)`, `out`, `tmp`,
+  `progress(fraction, message)`, `log(message)` — passed as the keyword-only
+  `sup`. Nothing is imported across the two repositories; it is duck-typed.
+- `sup.run` invokes the named tool the way the runner does — its own venv, its
+  own interpreter — and returns what that tool returned: a `Path`, or a
+  `dict[str, Path]`.
+  [`testkit/src/sadt_testkit/_driver.py`](../testkit/src/sadt_testkit/_driver.py)
+  already does exactly this, and `tools/ASO/tests/test_integration.py` wraps it
+  in a dozen lines to make a working supervisor. That is the reference.
+- **a concurrency answer.** A supervised call holds its caller's slot for the
+  whole nested run. The old in-process version had the same problem and said so:
+  four concurrent ASO runs each waiting on a fifth slot deadlock the server,
+  `/health` included. Whatever caps tool concurrency must not count the parent
+  while it is blocked on a child.
+
+`describe.py` publishes `"supervisor": true` for a tool that takes one, so **a
+runner without supervisor support can refuse the tool at discovery rather than
+call it and fail halfway**. Until it lands, ASO's other three modes are servable
+and fully-automated CBCT is not — and passing `landmarks` (a folder of
+`.mrk.json`) makes even that mode work with no supervisor at all, which is also
+what lets ASO be used standalone.
+
+[issue #11]: https://github.com/Jules-GP/sadt-tools/issues/11
 
 ## 6. What to delete, and when
 

@@ -113,10 +113,44 @@ several named outputs, and it must not write beside its inputs, into the working
 directory or anywhere else. `output/` at the repository root is gitignored —
 point a manual run at it rather than scattering results through the tree.
 
-**`run()` does not read the environment, does not know about `/DATA`, and does
-not call another tool.** Path resolution and tool sequencing belong to the
-server. Model weights are not packaged either: the server fetches them into
-`/DATA/<tool>/models` and passes the path in.
+**`run()` does not read the environment and does not know about `/DATA`.** Path
+resolution belongs to the server. Model weights are not packaged either: the
+server fetches them into `/DATA/<tool>/models` and passes the path in.
+
+**Tool sequencing belongs to the server too — with one exception.** Where one
+tool's output is another's input, the server chains them and neither tool knows
+the other exists. That covers almost every case: `Crown_Seg → ALI` is two calls
+with a folder in between. The exception is a tool that needs another *in the
+middle of its own run*, where the output cannot simply be fed in beforehand.
+`ASO` is the only one: fully-automated CBCT recentres its scans, predicts
+landmarks **on the centred volumes**, and then registers. For that, take a
+supervisor:
+
+```python
+def run(scans: Path, reference: Path, output_dir: Path, *, sup=None) -> Path:
+    ...
+    landmarks = sup.run("ALI", input=centered, model=bundle, output_dir=...)
+```
+
+- `sup` is **keyword-only and unannotated**, and that shape is the marker:
+  `describe.py` keeps it out of the schema and publishes `"supervisor": true`
+  instead, so a runner that cannot inject one refuses the tool rather than
+  calling it and failing halfway. A `sup` that is positional or annotated is a
+  hard error, not a schema entry.
+- It is **duck-typed**. Never import a supervisor type — that would need a
+  package shared with the server, which is what the split removes.
+- Five members, nothing more: `sup.run(tool, **params)`, `sup.out`, `sup.tmp`,
+  `sup.progress(fraction, message)`, `sup.log(message)`.
+- `sup.run("ALI", ...)`, never `sup.ALI(...)`. A typo in a string is greppable;
+  a typo in an attribute is an `AttributeError` fifteen minutes into a job, and
+  the call graph stops being inspectable.
+- **Give the caller a way in.** A tool that takes `sup` should also accept the
+  dependency's output as an ordinary argument (`landmarks: Path = ""`) and skip
+  the call when it is supplied. That is what keeps it usable standalone, and it
+  is the only way it works with no supervisor at all.
+
+Reach for this only when the ordering genuinely forbids chaining. Two calls with
+a folder in between is simpler for everyone, and the server already does it.
 
 Check the result before going further:
 
@@ -199,7 +233,11 @@ def test_on_freshly_segmented_meshes(tmp_path):
 Skip, never fail, when the other tool is not built: CI builds each tool in its
 own job. `tools/_template/tests/test_integration.py` is the file to copy, and
 [testkit/README.md](testkit/README.md) covers the rest. This is a **development
-dependency**; `run()` itself still must not call another tool.
+dependency** and must never appear in `[project] dependencies`.
+
+It is also what a supervisor is built out of in a test: `tools/ASO`'s `LocalSup`
+is a dozen lines wrapping `run_tool`, and the tool cannot tell it from the
+server's.
 
 GPU tests carry `@pytest.mark.gpu`. CI skips them (`-m "not gpu"`) because the
 runner has no CUDA device, which makes them your responsibility: run them by

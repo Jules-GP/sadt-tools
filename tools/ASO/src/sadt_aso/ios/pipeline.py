@@ -23,7 +23,7 @@ from .. import catalogs, markups
 from . import icp as ios_icp
 from . import pre_icp, surfaces
 
-logger = logging.getLogger("ASO")
+logger = logging.getLogger(__name__)
 
 # Tokens naming a jaw inside a file name. The original tested only for "_U_" and
 # the substring "upper", and DEFAULTED TO LOWER when neither was found -- so a
