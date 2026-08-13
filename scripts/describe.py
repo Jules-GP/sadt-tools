@@ -56,6 +56,17 @@ ACCEPTED_DEFAULTS = {
 # render, so they are refused rather than silently stringified.
 LITERAL_TYPES = (str, int)
 
+# The supervisor: how a tool calls ANOTHER tool. It is keyword-only,
+# unannotated, and excluded from the schema -- a client never sends it, because
+# it is not data. The runner injects it.
+#
+# Unannotated is the marker rather than an accident: every other parameter must
+# be annotated, so there is nothing else this shape could be, and a tool cannot
+# grow a supervisor by forgetting a type. It is duck-typed on purpose -- a tool
+# importing a supervisor class would need a package shared with the server,
+# which is the coupling this repository exists to remove.
+SUPERVISOR = "sup"
+
 
 class SchemaError(Exception):
     """The tool cannot be described. Always actionable, always fatal."""
@@ -212,6 +223,30 @@ def check_default(name, kind, default, choices=None):
     return default
 
 
+def is_supervisor(name, parameter, hints):
+    """Whether this parameter is the supervisor, refusing near-misses.
+
+    A near-miss is worth a hard error rather than a schema entry: `sup` typed
+    as a `Path` would be published as a file the client is asked to upload, and
+    a positional `sup` would be filled by the first argument the runner passes.
+    Both fail far from here.
+    """
+    if name != SUPERVISOR:
+        return False
+    if parameter.kind is not parameter.KEYWORD_ONLY:
+        raise SchemaError(
+            "'{0}' must be keyword-only: write `*, {0}=None`. Anything else can be "
+            "filled positionally by a caller that meant it as data.".format(SUPERVISOR)
+        )
+    if name in hints:
+        raise SchemaError(
+            "'{0}' must not be annotated. Being unannotated is what marks it as the "
+            "supervisor rather than an argument, and it is duck-typed so a tool never "
+            "imports the server's type.".format(SUPERVISOR)
+        )
+    return True
+
+
 def describe_run(run):
     """Turn run()'s signature and docstring into the published schema."""
     doc = inspect.getdoc(run)
@@ -228,7 +263,13 @@ def describe_run(run):
         raise SchemaError("cannot resolve run()'s annotations: {}".format(error))
 
     arguments = {}
+    supervisor = False
     for name, parameter in signature.parameters.items():
+        if is_supervisor(name, parameter, hints):
+            # Excluded from `arguments` entirely: it is not something a client
+            # can send, so publishing it would put a control on every form.
+            supervisor = True
+            continue
         if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
             raise SchemaError(
                 "run() takes *{}. The runner calls run(**params) from a JSON "
@@ -257,11 +298,18 @@ def describe_run(run):
             # bare scalar means exactly one.
             arguments[name]["choices"] = choices
 
-    return {
+    described = {
         "description": doc.strip().splitlines()[0].strip(),
         "arguments": arguments,
         "returns": return_name(hints.get("return", signature.return_annotation)),
     }
+    if supervisor:
+        # Published so the server can tell, before accepting a job, that this
+        # tool needs something to be injected. A deployment whose runner cannot
+        # supply one has to refuse the tool rather than call it and have the
+        # call fail halfway through.
+        described["supervisor"] = True
+    return described
 
 
 def source_hash(src_dir):
