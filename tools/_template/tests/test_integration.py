@@ -1,8 +1,8 @@
 """The tool as the server actually invokes it: out of process, in its own venv.
 
 Copy this file into a new tool and point `run_tool` at whatever produces its
-input. `tools/ali`, for instance, needs meshes that carry tooth labels, so its
-version of this runs `crownseg` first and feeds the result straight in — the
+input. `tools/ALI`, for instance, needs meshes that carry tooth labels, so its
+version of this runs `Crown_Seg` first and feeds the result straight in — the
 real handoff, not a fixture standing in for one.
 
 Two things are only testable from out here:

@@ -1,7 +1,7 @@
 """Run one tool from another tool's tests, without coupling them.
 
-`tools/ali` cannot be tested end to end without segmented meshes, and those
-come from `tools/crownseg`. Importing crownseg into ali would put the coupling
+`tools/ALI` cannot be tested end to end without segmented meshes, and those
+come from `tools/Crown_Seg`. Importing crownseg into ali would put the coupling
 back that the split exists to remove -- and it could not work anyway, since the
 two have different interpreters and irreconcilable dependency sets.
 
@@ -13,7 +13,7 @@ is a **development dependency only** and must never appear in a tool's
     from sadt_testkit import run_tool
 
     meshes = run_tool(
-        "crownseg",
+        "Crown_Seg",
         meshes=raw_scan,
         model=checkpoint,
         output_dir=tmp_path / "segmented",
@@ -89,7 +89,7 @@ def is_built(name: str) -> bool:
     working on one tool has no reason to have built the others, and CI builds
     each tool in its own job.
 
-        pytest.mark.skipif(not is_built("crownseg"), reason="run uv sync in tools/crownseg")
+        pytest.mark.skipif(not is_built("Crown_Seg"), reason="run uv sync in tools/Crown_Seg")
     """
     try:
         tool_venv_python(name)

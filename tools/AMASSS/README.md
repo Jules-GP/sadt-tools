@@ -143,7 +143,7 @@ tests stub `nnunet_runner.predict_folder` and need no checkpoint.
 ## Working on it
 
 ```bash
-cd tools/amasss
+cd tools/AMASSS
 uv sync                    # ~7.7 GB, CUDA wheels
 uv run pytest -m "not gpu" # 48 tests, no GPU and no checkpoints needed
 uv run pytest -m models    # the real bundle, see tests/data/README.md

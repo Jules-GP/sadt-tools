@@ -166,7 +166,7 @@ The 23 other tests stub the engine and run anywhere, which is what CI does.
 ## Working on it
 
 ```bash
-cd tools/crownseg
+cd tools/Crown_Seg
 uv sync                          # fast: no shapeaxi, no pytorch3d
 uv run pytest                    # 23 tests, engine stubbed
 uv sync --extra segmentation     # compiles pytorch3d, needs nvcc

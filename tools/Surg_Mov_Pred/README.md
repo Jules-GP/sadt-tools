@@ -103,7 +103,7 @@ GPU tests: none exist, the tool is CPU-only.
 ## Working on it
 
 ```bash
-cd tools/surgmovpred
+cd tools/Surg_Mov_Pred
 uv sync
 uv run pytest              # 24 tests on models built in the test itself
 uv run pytest -m models    # against the real packages, see tests/data/README.md

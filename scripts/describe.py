@@ -4,7 +4,7 @@
 Run it with the tool's OWN interpreter, because importing the tool needs the
 tool's dependencies and nothing in this repository shares an environment:
 
-    tools/amasss/.venv/bin/python scripts/describe.py tools/amasss
+    tools/AMASSS/.venv/bin/python scripts/describe.py tools/AMASSS
 
 The signature is the single source of truth. There is no second declaration to
 keep in step, which is the whole reason the old `ArgSpec` tables are gone: they
@@ -330,7 +330,7 @@ def main(argv=None):
         nargs="?",
         default=".",
         type=Path,
-        help="the tool package directory, e.g. tools/amasss (default: cwd)",
+        help="the tool package directory, e.g. tools/AMASSS (default: cwd)",
     )
     parser.add_argument("--module", help="package to import, if src/ holds more than one")
     parser.add_argument("-o", "--output", type=Path, help="write here instead of stdout")

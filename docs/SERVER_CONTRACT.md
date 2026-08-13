@@ -72,7 +72,7 @@ the JSON the server publishes. Run it with the **tool's own interpreter** —
 importing a tool needs the tool's dependencies:
 
 ```bash
-/tools/amasss/.venv/bin/python /tools/scripts/describe.py /tools/amasss
+/tools/AMASSS/.venv/bin/python /tools/scripts/describe.py /tools/AMASSS
 ```
 
 It is dependency-free and stays Python 3.9-compatible so it can run inside any
@@ -227,7 +227,7 @@ their previous defaults. The server passes them only to override:
 | `settings.AMASSS_TILE_STEP_SIZE` | `tile_step_size` (amasss) | `0.5` |
 | `settings.AMASSS_GPU_RESAMPLING` | `gpu_resampling` (amasss) | `true` |
 | `settings.BATCHDENTALSEG_TILE_STEP_SIZE` | `tile_step_size` (batchdentalseg) | `0.5` |
-| `settings.CROWNSEG_NUM_WORKERS` | `num_workers` (crownseg) | `2` |
+| `settings.CROWNSEG_NUM_WORKERS` | `num_workers` (Crown_Seg) | `2` |
 | `settings.*_MAX_GPU_JOBS` | — | gone; see "Capping GPU work" |
 
 `tile_step_size` and `gpu_resampling` **change the segmentation**. The tools

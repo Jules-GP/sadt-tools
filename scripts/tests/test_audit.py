@@ -45,11 +45,11 @@ def make_tool(root, name, requires_python, dependencies, locked=()):
 @pytest.fixture
 def repo(tmp_path):
     """Three tools on two torch versions, plus one with no torch at all."""
-    make_tool(tmp_path, "amasss", ">=3.11", ["torch==2.2.0"], [("torch", "2.2.0")])
-    make_tool(tmp_path, "ali", ">=3.9,<3.10", ["torch==2.2.0"], [("torch", "2.2.0")])
+    make_tool(tmp_path, "AMASSS", ">=3.11", ["torch==2.2.0"], [("torch", "2.2.0")])
+    make_tool(tmp_path, "ALI", ">=3.9,<3.10", ["torch==2.2.0"], [("torch", "2.2.0")])
     make_tool(
         tmp_path,
-        "crownseg",
+        "Crown_Seg",
         ">=3.11",
         ["torch==2.4.1"],
         [("torch", "2.4.1"), ("nvidia-cublas-cu12", "12.4.5.8")],
@@ -89,8 +89,8 @@ def test_alignment_is_suggested_but_never_applied(repo, capsys):
     }
 
     assert "2 distinct torch runtime(s)" in out
-    assert "crownseg pins torch 2.4.1; aligning to 2.2.0 would drop one runtime" in out
-    # The CUDA wheels in crownseg's lock are what makes it the 4.9 GB estimate
+    assert "Crown_Seg pins torch 2.4.1; aligning to 2.2.0 would drop one runtime" in out
+    # The CUDA wheels in Crown_Seg's lock are what makes it the 4.9 GB estimate
     # rather than the CPU-only 0.9 GB one.
     assert "saving ~4.9 GB" in out
     assert "revalidating" in out

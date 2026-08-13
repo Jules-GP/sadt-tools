@@ -35,14 +35,31 @@ git worktree add ../sadt-amasss tool/amasss
 ## 2. Copy the template
 
 ```bash
-cp -r tools/_template tools/amasss
-cd tools/amasss
+cp -r tools/_template tools/AMASSS
+cd tools/AMASSS
 mv src/sadt_template src/sadt_amasss
 ```
 
 Then edit `pyproject.toml` (`name`, `requires-python`, `dependencies`), and
-delete the placeholder pipeline. The directory name is the tool's slug — it is
-what the server puts in a path — so keep it lowercase and stable.
+delete the placeholder pipeline.
+
+**The directory name IS the tool name.** The server looks up a tool's
+interpreter at `<TOOLS_DIR>/<tool name>/.venv/bin/python`, so the two cannot
+differ. The convention:
+
+- an acronym stays as it is — `ALI`, `ASO`, `AMASSS`;
+- anything else is capitalised words joined by underscores —
+  `Batch_Dental_Seg`, `Crown_Seg`, `Surg_Mov_Pred`, `Example_Tool`;
+- a client renders the name with the underscores as spaces where it can.
+
+The **Python package** under `src/` stays lowercase — `sadt_batch_dental_seg`,
+not `sadt_Batch_Dental_Seg` — because it is a Python identifier and PEP 8
+applies. `describe.py` finds it as "the single package under src/", so the two
+spellings never have to agree.
+
+Renaming a tool is a **breaking change for every client**: the name is what a
+client sends, and the Slicer modules hold it in `TOOL_NAME`. Change it in the
+same breath as the client, or the tool disappears from the UI.
 
 ## 3. Write `run()`
 
@@ -173,9 +190,9 @@ a subprocess — the way the server does — so nothing is imported across tools
 ```python
 from sadt_testkit import is_built, run_tool
 
-@pytest.mark.skipif(not is_built("crownseg"), reason="run uv sync in tools/crownseg")
+@pytest.mark.skipif(not is_built("Crown_Seg"), reason="run uv sync in tools/Crown_Seg")
 def test_on_freshly_segmented_meshes(tmp_path):
-    segmented = run_tool("crownseg", meshes=..., model=..., output_dir=tmp_path / "seg")
+    segmented = run_tool("Crown_Seg", meshes=..., model=..., output_dir=tmp_path / "seg")
     run(scans=segmented, model=..., output_dir=tmp_path / "out")
 ```
 

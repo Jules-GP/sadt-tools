@@ -96,7 +96,7 @@ to date was produced. No vtk: the mesh exports are not ported.
 
 The CUDA wheels come from an explicit index (`explicit = true` is load-bearing —
 without it uv looks for every package on the PyTorch index); the venv is 7.2 GB.
-The reasoning is the same as AMASSS's, at length in `tools/amasss/README.md`.
+The reasoning is the same as AMASSS's, at length in `tools/AMASSS/README.md`.
 
 ## Validated against
 
@@ -136,7 +136,7 @@ tests stub `nnunet_runner.predict_folder` and need no checkpoint.
 ## Working on it
 
 ```bash
-cd tools/batchdentalseg
+cd tools/Batch_Dental_Seg
 uv sync                    # ~7.2 GB, CUDA wheels
 uv run pytest -m "not gpu" # 24 tests, no GPU and no checkpoints needed
 uv run pytest -m models    # a real bundle, see tests/data/README.md

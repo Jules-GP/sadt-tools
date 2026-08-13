@@ -161,7 +161,7 @@ def test_tool_schema_reads_what_the_server_would_publish():
 def test_a_chain_can_be_driven_off_the_published_schema(scans, tmp_path):
     """What the server does: read the schema, then call with what it declares.
 
-    This is the shape every real chain takes -- crownseg -> ali, ali -> aso --
+    This is the shape every real chain takes -- Crown_Seg -> ALI, ALI -> ASO --
     so it is worth one test on a tool that costs nothing to run.
     """
     schema = tool_schema(TEMPLATE)

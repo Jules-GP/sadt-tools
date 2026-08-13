@@ -8,9 +8,9 @@ the resolution of the tool it is helping to test.
 
 ## Why it exists
 
-`tools/ali` cannot be tested end to end without meshes that carry tooth labels,
-and those come out of `tools/crownseg`. `tools/aso` needs landmarks, which come
-out of `tools/ali`. Before the split each of them simply imported the next
+`tools/ALI` cannot be tested end to end without meshes that carry tooth labels,
+and those come out of `tools/Crown_Seg`. `tools/ASO` needs landmarks, which come
+out of `tools/ALI`. Before the split each of them simply imported the next
 (`ALILogic.py` did `from tools.CrownSeg.src import CrownSegLogic`), and that is
 the coupling the split removed: tools are sequenced by the server now.
 
@@ -20,9 +20,9 @@ the other tool is run as a subprocess, through its own `.venv`, exactly the way
 the server runs it.
 
 ```
-tools/ali/.venv/bin/python  →  tests
-                                 └─ run_tool("crownseg", ...)
-                                      └─ tools/crownseg/.venv/bin/python  →  run()
+tools/ALI/.venv/bin/python  →  tests
+                                 └─ run_tool("Crown_Seg", ...)
+                                      └─ tools/Crown_Seg/.venv/bin/python  →  run()
 ```
 
 Nothing is shared at runtime. The two tools keep different interpreters and
@@ -33,10 +33,10 @@ irreconcilable dependency sets, and neither imports the other.
 ```python
 from sadt_testkit import is_built, run_tool, tool_schema
 
-@pytest.mark.skipif(not is_built("crownseg"), reason="run uv sync in tools/crownseg")
+@pytest.mark.skipif(not is_built("Crown_Seg"), reason="run uv sync in tools/Crown_Seg")
 def test_ali_on_freshly_segmented_meshes(tmp_path):
     segmented = run_tool(
-        "crownseg",
+        "Crown_Seg",
         meshes=RAW_SCAN,
         model=CROWNSEG_MODEL,
         output_dir=tmp_path / "segmented",
