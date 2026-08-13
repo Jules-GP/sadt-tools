@@ -36,8 +36,8 @@ GROUP_LABELS = {
     "CI": ["UR3OIP", "UL3OIP", "UR3RIP", "UL3RIP"],
 }
 
-# What the schema publishes: display name -> region code. Order is the order
-# the client renders the check boxes in.
+# What the schema publishes as `choices`: display name -> region code. Order is
+# the order the client renders the check boxes in.
 REGION_NAMES = {
     "Cranial base": "CB",
     "Upper": "U",
@@ -46,11 +46,6 @@ REGION_NAMES = {
 }
 
 REGION_CODES = tuple(REGION_NAMES.values())
-
-# Every region on by default: a landmark whose weights are absent from the
-# chosen bundle costs nothing but a line in the run report, whereas a region
-# left off by default is one the user never discovers.
-REGION_CHOICES = {display_name: True for display_name in REGION_NAMES}
 
 # The UI spelling of the impacted-canine landmarks, mapped to the spelling the
 # weights are packaged under. Accepted, never emitted.
@@ -68,12 +63,6 @@ LABEL_GROUPS.update({alias: LABEL_GROUPS[canonical] for alias, canonical in _ALI
 
 LABELS = tuple(label for labels in GROUP_LABELS.values() for label in labels)
 
-# Every catalog landmark, all off. "All off" is what "not specified" looks like
-# for a multichoice, and it hands the decision back to `cbct_regions`. Off
-# rather than on, unlike REGION_CHOICES: 119 landmarks all on would mean every
-# panel that never touches this field silently overrides the region selection.
-LANDMARK_CHOICES = {label: False for label in LABELS}
-
 # The two spacings the agent walks, coarse first. The scale key is the spacing
 # with its decimal point replaced, because that is what the shipped weight
 # folders are named (`<landmark>/1/` and `<landmark>/0-3/`).
@@ -81,14 +70,6 @@ SCALE_SPACINGS = (1.0, 0.3)
 
 # Region code -> a name a human reads. Used for the run report only.
 REGION_DISPLAY_NAMES = {code: display for display, code in REGION_NAMES.items()}
-
-# The tabs a client lays the 119 `landmarks` check boxes out in: the SAME
-# grouping the engine names its output files by, published rather than
-# restated, so a landmark added to GROUP_LABELS gets its tab with no client
-# release. In REGION_NAMES order, so the tabs read like the check boxes above.
-LANDMARK_GROUPS = {
-    display: tuple(GROUP_LABELS[code]) for display, code in REGION_NAMES.items()
-}
 
 UNGROUPED = "Other"
 
@@ -117,38 +98,54 @@ def group_of(label: str) -> str:
 def region_codes(selection) -> tuple:
     """Turn what `run()` received for `cbct_regions` into region codes.
 
-    Accepts a `base.Selection` (the HTTP path), None for an omitted optional
-    argument, or a plain sequence of codes, so the engine stays callable by
-    another server-side tool that does not know the display names.
+    The published options are the display names ("Cranial base"), because that
+    is what a client renders; the codes ("CB") are accepted too, so a caller
+    driving this package directly need not know the display spellings. None
+    means the argument was omitted entirely and every region is wanted.
+
+    An unknown name raises rather than being dropped: `Literal` is published,
+    not enforced -- the runner calls `run(**params)` from a JSON object -- so a
+    stale client sending a region that no longer exists must be told, not
+    silently given a narrower run than it asked for.
     """
     if selection is None:
         return REGION_CODES
-    if isinstance(selection, dict):
-        return tuple(
-            REGION_NAMES[name]
-            for name, enabled in selection.items()
-            if enabled and name in REGION_NAMES
-        )
-    return tuple(selection)
+    codes = []
+    for name in selection:
+        if name in REGION_NAMES:
+            codes.append(REGION_NAMES[name])
+        elif name in REGION_CODES:
+            codes.append(name)
+        else:
+            raise ValueError(
+                f"Unknown CBCT region {name!r}. Known: {', '.join(REGION_NAMES)}."
+            )
+    # Declaration order, not the caller's, so the run report reads the same way
+    # however the request was assembled.
+    return tuple(code for code in REGION_CODES if code in set(codes))
 
 
 def landmark_names(selection) -> tuple:
     """Turn what `run()` received for `landmarks` into canonical label names.
 
     Empty is the normal case and means "not specified": `cbct_regions` decides.
-    Same accepted shapes as `region_codes`. Aliases are resolved here
-    (`UR3OI` -> `UR3OIP`), the weights only ever using the canonical spelling.
+    Aliases are resolved here (`UR3OI` -> `UR3OIP`), the weights only ever using
+    the canonical spelling.
+
+    Unlike `region_codes`, a name this catalog does not know is NOT refused: the
+    engine runs any explicitly named landmark the bundle has weights for, which
+    is what lets a bundle ship a point this vocabulary has not heard of. It is
+    reported as `landmarks_ungrouped` in the run report.
     """
     if selection is None:
         return ()
-    if isinstance(selection, dict):
-        chosen = [name for name, enabled in selection.items() if enabled]
-    else:
-        chosen = list(selection)
+    chosen = list(selection)
     # Declaration order, not the caller's: it is the order the report and the
-    # per-group output files already use.
+    # per-group output files already use. Anything outside the catalog keeps
+    # the caller's order and follows, rather than being dropped.
     wanted = {canonical(name) for name in chosen}
-    return tuple(label for label in LABELS if label in wanted)
+    known = tuple(label for label in LABELS if label in wanted)
+    return known + tuple(sorted(wanted - set(known)))
 
 
 def landmarks_in(codes) -> tuple:

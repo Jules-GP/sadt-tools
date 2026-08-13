@@ -16,42 +16,26 @@ Three defects fixed, all of which cost results silently:
 * a jaw whose weights are missing raised a `KeyError` that was caught and
   discarded, so the jaw vanished from the output. It is reported now.
 * a mesh with no tooth labels fell back to all-zeros, so no tooth was ever
-  found and the run ended with no landmarks and no reason. ALILogic segments
-  such a mesh through CrownSeg first.
+  found and the run ended with no landmarks and no reason. Every mesh is
+  checked for labels up front now, and a batch missing them names Crown_Seg.
 * `.stl` input was accepted by the UI and then never discovered by the CLI,
   which globbed for `.vtk` only.
 """
 
 import logging
 import os
-import sys
-import threading
 import time
 
-from base import ToolArgumentError, ToolUnavailableError
-from config import settings
-
+from ..cbct.brain import import_torch, resolve_device
+from ..errors import ToolInputError, ToolUnavailableError
 from ..markups import MARKUPS_EXTENSION
 from ..markups import write as write_markups
-from ..ALI_CBCT.brain import import_torch, resolve_device
-from . import landmarks as catalog
+from . import catalog
 from . import render, surface
 
-logger = logging.getLogger("ALI.ios")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
+logger = logging.getLogger(__name__)
 
-_GPU_SEMAPHORE = threading.BoundedSemaphore(max(1, int(settings.ALI_MAX_GPU_JOBS)))
-
-_MONAI_HINT = (
-    "ALI's IOS engine needs monai: pip install -r requirements.txt (see server/README.md)."
-)
+_MONAI_HINT = "ALI's IOS engine needs monai. Run `uv sync` in tools/ALI."
 
 
 def _import_unet():
@@ -66,11 +50,11 @@ def check_dependencies() -> None:
     """Import the whole lazy stack once, before any mesh is touched.
 
     Same reason as the CBCT engine's: a missing dependency belongs to the
-    server, not to a patient's mesh, and the per-mesh `except` below would
+    venv, not to a patient's mesh, and the per-mesh `except` below would
     otherwise report it once per mesh and then hide it behind "produced no
-    landmarks for any mesh". It matters more here -- pytorch3d is absent from
-    the current deployment image, so this is the failure an IOS run actually
-    hits today, and it has to say so in one clear line.
+    landmarks for any mesh". It matters more here -- pytorch3d is an optional
+    extra compiled from source, so this is the failure an IOS run actually hits
+    on a venv synced without it, and it has to say so in one clear line.
     """
     import_torch()
     surface.import_vtk()
@@ -99,10 +83,10 @@ def discover_weights(model_path: str):
     model quietly predicted the lower arch with the maxillary one.
     """
     if not os.path.isdir(model_path):
-        # An argument error, not a server fault: the caller named a hosted
-        # entry that is not an IOS bundle. Basename only -- the message goes
-        # to the client verbatim, the server path does not.
-        raise ToolArgumentError(
+        # An argument error, not a fault of this tool: the caller pointed
+        # `model` at something that is not an IOS bundle. Basename only -- the
+        # message reaches the client verbatim, the server's paths do not.
+        raise ToolInputError(
             f"IOS model bundle '{os.path.basename(model_path.rstrip(os.sep))}' "
             f"is not a directory."
         )
@@ -123,6 +107,32 @@ def discover_weights(model_path: str):
             weights.setdefault(network, {})[jaw] = os.path.join(root, name)
 
     return weights, sorted(unrecognized)
+
+
+def require_labels(meshes: list) -> None:
+    """Refuse a batch whose meshes carry no tooth labels, naming what makes them.
+
+    This is where `ALILogic.ensure_segmented()` used to call CrownSeg in-process
+    and hand the labelled mesh straight on. Tools no longer call each other, so
+    the chain is the server's to run -- and the tool's job is to say so in a way
+    the person who sent the request can act on, rather than failing per mesh
+    with "no known tooth number is present".
+
+    Checked for the WHOLE batch before any weights are loaded: reading a mesh's
+    point-data array names is cheap, and discovering this on mesh 40 of 40 after
+    an hour of inference is the failure worth spending that scan on.
+    """
+    unlabelled = [key for path, key in meshes if surface.label_array_name(
+        surface.read_surface(path)) is None]
+    if not unlabelled:
+        return
+    raise ToolInputError(
+        f"{len(unlabelled)} of {len(meshes)} mesh(es) carry no tooth labels, so there is "
+        f"nothing for the landmark networks to be pointed at. Expected a point-data array "
+        f"named one of: {', '.join(surface.LABEL_ARRAY_NAMES)}. Run 'Crown_Seg' over these "
+        f"meshes first and send its output here -- its run report lists every labelled mesh "
+        f"under 'segmented_meshes'."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -322,19 +332,18 @@ def _predict_one_tooth(unet, renderer, mesh, network, jaw, tooth_number, label_n
     if center is None:
         return {}
 
-    with _GPU_SEMAPHORE:
-        images, pix_to_face = render.render_views(
-            renderer=renderer,
-            mesh=mesh,
-            center=center,
-            radius=catalog.CAMERA_RADIUS[network],
-            camera_positions=render.CAMERA_POSITIONS[network][jaw],
-            device=device,
-        )
-        # (1, views, 4, H, W) -> (views, 4, H, W): one image per camera, which
-        # is the batch the UNet consumes.
-        with torch.no_grad():
-            predictions = unet(images[0].float().to(device))
+    images, pix_to_face = render.render_views(
+        renderer=renderer,
+        mesh=mesh,
+        center=center,
+        radius=catalog.CAMERA_RADIUS[network],
+        camera_positions=render.CAMERA_POSITIONS[network][jaw],
+        device=device,
+    )
+    # (1, views, 4, H, W) -> (views, 4, H, W): one image per camera, which is
+    # the batch the UNet consumes.
+    with torch.no_grad():
+        predictions = unet(images[0].float().to(device))
 
     found = {}
     # Channel 0 of the network output is background; the landmark types start
@@ -354,7 +363,6 @@ def predict_landmarks(
     networks=None,
     prediction_ID: str = "Pred",
     output_dir: str = None,
-    scratch_dir: str = None,
     device: str = None,
 ) -> dict:
     """Place landmarks on every mesh; return the run report.
@@ -362,8 +370,8 @@ def predict_landmarks(
     `meshes` is a list of `(absolute path, key)` pairs, the key being the
     path relative to the input root -- so a batch keeps its tree and two
     patients named `scan.vtk` in different folders cannot overwrite each other.
-    Every mesh is expected to carry tooth labels already; ALILogic runs
-    CrownSeg on the ones that do not.
+    Every mesh must already carry tooth labels: `require_labels` below refuses
+    the batch otherwise, naming the tool that produces them.
     """
     started_at = time.monotonic()
 
@@ -378,14 +386,17 @@ def predict_landmarks(
         network_names = ", ".join(
             catalog.NETWORK_DISPLAY_NAMES.get(code, code) for code in networks
         )
-        # 422, not 500: nothing the server can do -- the caller must pick
-        # the bundle (or the networks) that match. Slicer shows this verbatim.
-        raise ToolArgumentError(
+        # An input error, not a crash: nothing the server can do -- the caller
+        # must pick the bundle (or the networks) that match. Slicer shows this
+        # message verbatim.
+        raise ToolInputError(
             f"'{os.path.basename(model_path)}' has no IOS weights for the selected network(s) "
             f"({network_names}). Checkpoints must be named with an 'O' or 'C' token and an "
             f"'Upper' or 'Lower' token, e.g. Upper_O_model.pth."
             + (f" Unrecognized: {', '.join(unrecognized)}." if unrecognized else "")
         )
+
+    require_labels(meshes)
 
     renderer = render.build_renderer(device)
     logger.info(

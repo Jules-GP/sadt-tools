@@ -12,25 +12,15 @@ being constructed.
 """
 
 import logging
-import sys
 
-from base import ToolUnavailableError
-from config import settings
+from ..errors import ToolUnavailableError
 
-logger = logging.getLogger("ALI.cbct.brain")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
+logger = logging.getLogger(__name__)
 
-_INSTALL_HINT = (
-    "ALI's CBCT engine needs torch and monai. Install them with "
-    "`pip install -r requirements.txt` (see server/README.md)."
-)
+# torch and monai are ordinary locked dependencies here, so this only fires on
+# a venv that was never synced. It stays a lazy import all the same: describe.py
+# imports this package on every CI run and must not pay for a CUDA stack.
+_INSTALL_HINT = "ALI's CBCT engine needs torch and monai. Run `uv sync` in tools/ALI."
 
 # Width of the feature vector the DenseNet hands to the decision head. Part of
 # the trained weights' shape: changing it makes every shipped checkpoint fail
@@ -49,13 +39,13 @@ def import_torch():
 def resolve_device(requested: str = None) -> str:
     """The device to actually use, falling back to CPU when CUDA is absent.
 
-    Read from settings rather than decided by `torch.cuda.is_available()` deep
-    in the code -- which the original did independently in five modules, so a
-    server configured for CPU still used a card that happened to be present.
-    Shared by both engines.
+    Decided once, from the caller's `device` argument, rather than by
+    `torch.cuda.is_available()` deep in the code -- which the original did
+    independently in five modules, so a run asked for CPU still used a card
+    that happened to be present. Shared by both engines.
     """
     torch = import_torch()
-    wanted = (requested or settings.DEVICE or "cpu").strip().lower()
+    wanted = (requested or "cpu").strip().lower()
     if wanted.startswith("cuda") and not torch.cuda.is_available():
         logger.warning("DEVICE=%s requested but CUDA is unavailable; falling back to CPU", wanted)
         return "cpu"
@@ -75,8 +65,7 @@ def build_network(in_channels: int = TRANSITION_LAYER_SIZE, out_channels: int = 
 
     Defined inside a function rather than as module-level classes because
     `torch.nn.Module` cannot be subclassed without importing torch, and this
-    module must import on a server that has none (see the lazy-import rule in
-    ADDING_A_TOOL.md 7).
+    module must import in a CI job that has none (see CONTRIBUTING.md 3).
     """
     torch = import_torch()
     nn = torch.nn
@@ -135,7 +124,7 @@ class Brain:
         """Load one checkpoint per scale from {scale key: path}.
 
         `weights_only=True` is explicit: these are plain state dicts, they
-        arrive from a data store rather than from this codebase, and torch
+        arrive from a model bundle rather than from this codebase, and torch
         changed the default mid-2.x -- so stating it both closes the pickle
         surface and keeps the call meaning the same thing across versions.
         """

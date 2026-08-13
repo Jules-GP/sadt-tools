@@ -2,12 +2,10 @@
 
 Ported from ALI_CBCT/ALI_CBCT.py. What the CLI envelope did -- argparse,
 `ast.literal_eval` on stringified lists, `sys.exit()`, the
-`<filter-progress>` protocol, the caller-supplied temp and output folders --
-is gone: on this server scratch space and cleanup belong to main.py, and a
-failure has to be an exception, since a `SystemExit` raised inside a worker
-thread does not surface as a clean 500.
+`<filter-progress>` protocol -- is gone, and a failure has to be an exception
+rather than a `SystemExit` the caller cannot catch cleanly.
 
-Beyond that, three behaviours changed on purpose:
+Beyond that, two behaviours changed on purpose:
 
 * **Weights are discovered, landmarks are requested.** The bundle's folder
   tree says which landmarks it can predict; the caller's region selection says
@@ -16,43 +14,30 @@ Beyond that, three behaviours changed on purpose:
 * **One markups file per scan**, holding every landmark found. The original
   wrote one file per anatomical region, so every downstream tool (ASO, AREG,
   AutoMatrix) had to recombine them by hand.
-* **GPU work is serialized** by ALI's own semaphore, independently of
-  MAX_CONCURRENT_TOOLS: several concurrent requests each holding a DenseNet
-  and a padded volume do not fit on one card.
+
+The GPU semaphore this carried is gone with the shared server process: a tool
+is now its own process, so an in-process limit would cap nothing. Capping GPU
+work across concurrent jobs is the server's, and it has to be across tools.
 """
 
 import logging
 import os
 import shutil
-import sys
-import threading
 import time
 
 import numpy as np
 
-from base import ToolArgumentError
-from config import settings
-
+from ..errors import ToolInputError
 from ..markups import MARKUPS_EXTENSION
 from ..markups import write as write_markups
-from . import landmarks as catalog
+from . import catalog
 from . import preprocess
 from .agent import AGENT_FOV, MOVEMENT_COUNT, Agent, NotFound
 from .brain import Brain, import_torch, resolve_device
 
-logger = logging.getLogger("ALI.cbct")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
+logger = logging.getLogger(__name__)
 
-_GPU_SEMAPHORE = threading.BoundedSemaphore(max(1, int(settings.ALI_MAX_GPU_JOBS)))
-
-# Per-landmark search budgets when ALI_SEARCH_MAX_SECONDS is unset. Each search
+# Per-landmark search budget when `search_seconds` is left at 0. Each search
 # step is a forward pass, so CPU-only inference needs several times longer than
 # a GPU to reach the same place.
 _DEFAULT_BUDGET_SECONDS = {"cuda": 15.0, "cpu": 60.0}
@@ -60,16 +45,21 @@ _DEFAULT_BUDGET_SECONDS = {"cuda": 15.0, "cpu": 60.0}
 COMPOUND_EXTENSIONS = (".nii.gz", ".nrrd.gz", ".gipl.gz")
 
 
-def search_budget(device: str) -> float:
-    if settings.ALI_SEARCH_MAX_SECONDS is not None:
-        return float(settings.ALI_SEARCH_MAX_SECONDS)
+def search_budget(device: str, search_seconds: float = 0.0) -> float:
+    """The per-landmark time budget: the caller's, or this device's default.
+
+    0 means "not specified" -- there is no nullable type in the schema, so the
+    argument cannot default to None the way the setting it replaces did.
+    """
+    if search_seconds and search_seconds > 0:
+        return float(search_seconds)
     return _DEFAULT_BUDGET_SECONDS["cuda" if device.startswith("cuda") else "cpu"]
 
 
 def check_dependencies() -> None:
     """Import the whole lazy stack once, before any scan is touched.
 
-    A missing dependency is a property of the SERVER, not of one scan. Without
+    A missing dependency is a property of the VENV, not of one scan. Without
     this, the per-scan `except` below catches it as if a single patient's data
     were at fault: every scan fails identically -- each only after a complete
     histogram correction, so a 200-scan cohort spends real minutes discovering
@@ -114,10 +104,10 @@ def discover_weights(model_path: str) -> dict:
     same landmark as one naming them the way the CLI did.
     """
     if not os.path.isdir(model_path):
-        # An argument error, not a server fault: the caller named a hosted
-        # entry that is not a CBCT bundle. Basename only -- the message goes
-        # to the client verbatim, the server path does not.
-        raise ToolArgumentError(
+        # An argument error, not a fault of this tool: the caller pointed
+        # `model` at something that is not a CBCT bundle. Basename only -- the
+        # message reaches the client verbatim, the server's paths do not.
+        raise ToolInputError(
             f"CBCT model bundle '{os.path.basename(model_path.rstrip(os.sep))}' "
             f"is not a directory."
         )
@@ -222,13 +212,14 @@ def predict_landmarks(
     landmarks=(),
     prediction_ID: str = "Pred",
     output_dir: str = None,
-    scratch_dir: str = None,
+    work_dir: str = None,
     device: str = None,
+    search_seconds: float = 0.0,
 ) -> dict:
     """Place landmarks on every scan; return the run report.
 
     `scans` is a list of `(absolute path, key)` pairs, where the key is the
-    scan's path relative to the input root. ALILogic owns discovery and hands
+    scan's path relative to the input root. `dispatch` owns discovery and hands
     the keys over; this owns inference. Keying by relative path rather than by
     base name is what stops two patients called `scan.nii.gz` in different
     subfolders from overwriting each other -- silently, in the original, both
@@ -247,14 +238,14 @@ def predict_landmarks(
     regions = tuple(regions) if regions is not None else catalog.REGION_CODES
     landmarks = tuple(landmarks or ())
     prediction_ID = (prediction_ID or "Pred").strip() or "Pred"
-    budget = search_budget(device)
+    budget = search_budget(device, search_seconds)
 
     weights = discover_weights(model_path)
     if not weights:
-        # 422, not 500, here and below: nothing the server can do -- the
-        # caller must pick the bundle (or the regions) that match. Slicer
-        # shows these messages verbatim.
-        raise ToolArgumentError(
+        # An input error, not a crash, here and below: nothing the server can
+        # do -- the caller must pick the bundle (or the regions) that match.
+        # Slicer shows these messages verbatim.
+        raise ToolInputError(
             f"No CBCT landmark weights found in '{os.path.basename(model_path)}'. Expected "
             f"<bundle>/**/<landmark>/<scale>/*.pth, with scale folders named "
             f"{' and '.join(catalog.SCALE_KEYS)}."
@@ -271,12 +262,12 @@ def predict_landmarks(
                 f"region(s) ("
                 f"{', '.join(catalog.REGION_DISPLAY_NAMES.get(code, code) for code in regions)})"
             )
-        raise ToolArgumentError(
+        raise ToolInputError(
             f"'{os.path.basename(model_path)}' has no weights for any of the selected "
             f"{asked}. It provides: {', '.join(sorted(weights)) or 'nothing'}."
         )
 
-    preprocessed_dir = os.path.join(scratch_dir, "preprocessed")
+    preprocessed_dir = os.path.join(work_dir, "preprocessed")
     logger.info(
         "ALI CBCT: %d scan(s), %d landmark(s), device=%s", len(scans), len(runnable), device
     )
@@ -425,8 +416,7 @@ def _predict_one_scan(scan_path, key, record, weights, runnable, device, budget,
                     brain=brain,
                     environment=environment,
                 )
-                with _GPU_SEMAPHORE:
-                    voxel_position = agent.search(budget)
+                voxel_position = agent.search(budget)
             except NotFound as exc:
                 # At INFO, not DEBUG: these are rare (6 of 119 on the reference
                 # scan) and they are exactly what someone watching the log wants
@@ -461,9 +451,9 @@ def _predict_one_scan(scan_path, key, record, weights, runnable, device, budget,
                 )
     finally:
         environment.release()
-        # Deleted per scan rather than left to the end-of-request cleanup:
-        # three volumes per scan is gigabytes across a cohort, and holding all
-        # of them until the response streams is how TEMP_DIR fills up.
+        # Deleted per scan rather than left to the end of the run: three
+        # volumes per scan is gigabytes across a cohort, and holding all of
+        # them until `run()` returns is how the output volume fills up.
         shutil.rmtree(scan_work_dir, ignore_errors=True)
 
     if not positions:

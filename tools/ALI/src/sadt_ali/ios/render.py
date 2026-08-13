@@ -11,19 +11,19 @@ several are divided by the norm of a different vector than the one being
 normalized, so they are not unit length. That is not a typo to fix -- the
 shipped weights were trained on the views these exact vectors produce.
 
-pytorch3d is imported inside the functions that need it. It has no PyPI
-distribution and must be compiled into the deployment image, so on a server
-without it ALI still loads and publishes its schema, and only an IOS run fails.
+pytorch3d is imported inside the functions that need it. It is an optional
+extra of this package, compiled from source, so on a venv without it ALI still
+imports and publishes its schema, and only an IOS run fails.
 """
 
 import numpy as np
 
-from base import ToolUnavailableError
+from ..errors import ToolUnavailableError
 
 _INSTALL_HINT = (
-    "ALI's IOS engine needs pytorch3d, which has no PyPI distribution and must be "
-    "compiled into the deployment image against its torch/CUDA build. See "
-    "ALI_PORT_CONTEXT.md 4. The CBCT engine works without it."
+    "ALI's IOS engine needs pytorch3d, which publishes no usable wheel and is "
+    "compiled from source against this venv's torch. See the 'pytorch3d' section "
+    "of tools/ALI/README.md. The CBCT engine works without it."
 )
 
 
@@ -157,7 +157,7 @@ def render_views(renderer, mesh, center, radius: float, camera_positions, device
     each rendered pixel came from, which is how a predicted mask gets back
     onto the mesh.
     """
-    from ..ALI_CBCT.brain import import_torch
+    from ..cbct.brain import import_torch
 
     torch = import_torch()
     p3d = import_pytorch3d()

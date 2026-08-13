@@ -16,13 +16,22 @@ information in full, including the pins kept and the changes made.
 | [Surg_Mov_Pred](tools/Surg_Mov_Pred/) | `SurgMovPred_CLI/SurgMovPred_CLI.py` | `d7702ae` (2026-06-24) | 2026-08-12 | no — repackaging only. Model load order sorted for reproducibility, both result tables returned instead of one; predictions bit-identical to the pre-port implementation. |
 | [AMASSS](tools/AMASSS/) | `AMASSS_CLI/` | `21a62a8` (2026-05-22) | 2026-08-12 | no — repackaging only. Pinned to the deployed stack (torch 2.8.0+cu128, nnunetv2 2.8.1) rather than upstream's declared torch 2.2.0 / nnunetv2 2.8.0; masks bit-identical to the pre-port implementation, within nnUNet's own CUDA nondeterminism. |
 | [ASO](tools/ASO/) | — | — | not migrated yet | — |
-| [ALI](tools/ALI/) | — | — | not migrated yet | — |
+| [ALI](tools/ALI/) | `ALI_CBCT/`, `ALI_CBCT_utils/`, `ALI_IOS/`, `ALI_IOS_utils/` | **unrecorded** — see below | 2026-08-13 | no — repackaging only. Pinned to the deployed stack (torch 2.8.0+cu128, monai 1.6.0, itk 5.4.7). One visible behaviour change: an unlabelled IOS mesh is refused naming `Crown_Seg` instead of being segmented in-process. **Not validated against reference output** — no GPU run was made. |
 | [Crown_Seg](tools/Crown_Seg/) | — (written against `shapeaxi` directly) | shapeaxi 2.0.2 | 2026-08-12 | no — the network is untouched and its raw output is bit-identical. Carries a two-line workaround for a shapeaxi 2.0.x bug that breaks the tool upstream and downstream alike. |
 | [Batch_Dental_Seg](tools/Batch_Dental_Seg/) | `BATCHDENTALSEG/BATCHDENTALSEGLib/SegmentationWidget.py` | `6df3fab` (2026-08-05) | 2026-08-12 | no — repackaging only. Same stack as AMASSS (torch 2.8.0+cu128, nnunetv2 2.8.1); labels compared against the pre-port implementation. |
 
 A row is filled in by the PR that migrates the tool, in the same commit that
 adds the package. "Algorithm modified" is `no` for a pure repackaging and
 otherwise names what changed and why, matching the tool README.
+
+**ALI's upstream commit is unrecorded and that is a gap, not a style.** The
+server-side port landed as `ADD ALI & CrownSeg` (`a0ed474`, 2026-07-31) with no
+upstream revision in the message and none in the tree, so which upstream commit
+the algorithm came from cannot be recovered from either repository. The
+per-module mapping is exact and is in [tools/ALI/README.md](tools/ALI/README.md);
+only the revision is missing, and it needs filling in by whoever made that port.
+Until then, "no — repackaging only" is a claim about code that cannot be
+pointed at.
 
 `tools/_template/` has no row: it is the reference package the others are copied
 from, not a port.

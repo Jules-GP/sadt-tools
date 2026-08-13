@@ -12,21 +12,12 @@ real defects fixed -- see `_move` and `search`.
 """
 
 import logging
-import sys
 import time
 from collections import deque
 
 import numpy as np
 
-logger = logging.getLogger("ALI.cbct.agent")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
+logger = logging.getLogger(__name__)
 
 # The six moves the networks were trained to score, in the order their output
 # neurons are indexed. Order is part of the weights' contract.
@@ -224,7 +215,7 @@ class Agent:
         while not found:
             if time.monotonic() > deadline:
                 raise NotFound(
-                    f"did not converge within {max_seconds:g}s (see ALI_SEARCH_MAX_SECONDS)"
+                    f"did not converge within {max_seconds:g}s (see search_seconds)"
                 )
 
             if self._step():

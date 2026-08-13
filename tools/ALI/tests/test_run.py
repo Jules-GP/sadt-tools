@@ -7,34 +7,30 @@ output naming and tree preservation, the run report, and every cross-argument
 rule -- is exercised for real.
 
 The parts that genuinely cannot run here are skipped rather than faked: the
-IOS engine needs pytorch3d, which has no PyPI distribution and must be
-compiled into the deployment image. What does not need it (the model naming
-rule, the tooth vocabulary, the network selection) is tested regardless, since
-that is where the original's defects were.
+IOS engine needs pytorch3d, which publishes no usable wheel and is compiled
+from source behind the `ios` extra. What does not need it (the model naming
+rule, the tooth vocabulary, the network selection, the tooth-label check) is
+tested regardless, since that is where the original's defects were.
 
-Run just this module:
-    cd server && python -m pytest tools/ALI/test/
+    cd tools/ALI && uv run pytest
 """
 
 import json
 import os
-import zipfile
-
-# Set before anything imports config.Settings(), so the suite runs regardless
-# of the local environment.
-os.environ.setdefault("API_TOKEN", "test-token")
+import typing
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from base import ResolvedPath, Selection, ToolArgumentError, ToolUnavailableError
-from tools.ALI.ALI import ALITool
-from tools.ALI.src import ALILogic
-from tools.ALI.src import markups
-from tools.ALI.src.ALI_CBCT import landmarks as cbct_catalog
-from tools.ALI.src.ALI_IOS import landmarks as ios_catalog
-from tools.ALI.src.ALI_IOS import engine as ios_engine
+from sadt_ali import dispatch, markups, run
+from sadt_ali.cbct import catalog as cbct_catalog
+from sadt_ali.errors import ToolInputError, ToolUnavailableError
+from sadt_ali.ios import catalog as ios_catalog
+from sadt_ali.ios import engine as ios_engine
+
+ALL_REGIONS = list(cbct_catalog.REGION_NAMES)
+CRANIAL_BASE_ONLY = ["Cranial base"]
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +106,8 @@ def stub_agent(monkeypatch):
     Every landmark whose name starts with "X" is reported as not found, so the
     report's two failure kinds can be told apart in a test.
     """
-    from tools.ALI.src.ALI_CBCT import agent as agent_module
-    from tools.ALI.src.ALI_CBCT import engine as cbct_engine
+    from sadt_ali.cbct import agent as agent_module
+    from sadt_ali.cbct import engine as cbct_engine
 
     class StubBrain:
         def __init__(self, scale_keys, device, out_channels=6):
@@ -136,6 +132,13 @@ def stub_agent(monkeypatch):
     monkeypatch.setattr(cbct_engine, "Brain", StubBrain)
     monkeypatch.setattr(cbct_engine, "Agent", StubAgent)
     monkeypatch.setattr(cbct_engine, "resolve_device", lambda requested=None: "cpu")
+
+
+@pytest.fixture
+def cbct_environment():
+    pytest.importorskip("monai")
+    pytest.importorskip("itk")
+    pytest.importorskip("torch")
 
 
 # ---------------------------------------------------------------------------
@@ -170,19 +173,23 @@ def test_scale_keys_match_the_shipped_weight_folders():
     assert cbct_catalog.SCALE_KEYS == ("1", "0-3")
 
 
-def test_region_choices_are_all_on_by_default():
-    assert cbct_catalog.REGION_CHOICES == {
-        "Cranial base": True, "Upper": True, "Lower": True, "Impacted canine": True
-    }
-
-
 def test_region_codes_from_a_selection():
-    selection = Selection(
-        {"Cranial base": True, "Upper": False, "Lower": True, "Impacted canine": False}
-    )
-    assert cbct_catalog.region_codes(selection) == ("CB", "L")
+    assert cbct_catalog.region_codes(["Cranial base", "Lower"]) == ("CB", "L")
+    # The codes are accepted too, so a caller driving this package directly
+    # need not know the display spellings.
+    assert cbct_catalog.region_codes(["CB", "L"]) == ("CB", "L")
     # An omitted optional argument must fall back to every region, not to none.
     assert cbct_catalog.region_codes(None) == cbct_catalog.REGION_CODES
+    # Declaration order, not the caller's.
+    assert cbct_catalog.region_codes(["Lower", "Cranial base"]) == ("CB", "L")
+
+
+def test_an_unknown_region_is_refused_not_dropped():
+    """`Literal` is published, not enforced -- the runner calls run(**params)
+    from a JSON object. A stale client naming a region that no longer exists
+    has to be told, not handed a narrower run than it asked for."""
+    with pytest.raises(ValueError, match="Cranial base"):
+        cbct_catalog.region_codes(["Cranial base", "Sagittal"])
 
 
 def test_ios_offers_only_landmark_types_a_model_predicts():
@@ -204,38 +211,83 @@ def test_ios_tooth_numbering_matches_the_shipped_label_tables():
     assert ios_catalog.LABELS["C"]["8"] == ["UR1CL", "UR1CB"]
 
 
+def test_ios_network_codes_from_a_selection():
+    assert ios_catalog.network_codes(["Occlusal"]) == ("O",)
+    assert ios_catalog.network_codes(["O"]) == ("O",)
+    assert ios_catalog.network_codes(None) == ios_catalog.NETWORK_CODES
+    with pytest.raises(ValueError, match="Occlusal"):
+        ios_catalog.network_codes(["Buccal"])
+
+
+# ---------------------------------------------------------------------------
+# The published options and the catalogs cannot drift apart
+# ---------------------------------------------------------------------------
+
+def _choices(argument):
+    """The `Literal` options `run()` publishes for one argument."""
+    hint = typing.get_type_hints(run)[argument]
+    if typing.get_origin(hint) is list:
+        hint = typing.get_args(hint)[0]
+    return list(typing.get_args(hint))
+
+
+def test_the_published_regions_are_the_catalogs_own():
+    """`Literal` takes literals only, so it cannot be built from the catalog.
+    That makes the signature a second declaration of the same set, and this is
+    what keeps the two honest: a region added to one and not the other would be
+    unselectable from the client, or offered and then refused."""
+    assert _choices("cbct_regions") == list(cbct_catalog.REGION_NAMES)
+
+
+def test_the_published_landmarks_are_the_catalogs_own():
+    assert _choices("landmarks") == list(cbct_catalog.LABELS)
+
+
+def test_the_published_networks_are_the_catalogs_own():
+    assert _choices("ios_networks") == list(ios_catalog.NETWORK_NAMES)
+
+
+def test_every_published_default_is_one_of_its_own_options():
+    """A default outside its option list gives the client a picker that cannot
+    produce the value the tool starts from."""
+    import inspect
+
+    for argument in ("cbct_regions", "ios_networks", "device"):
+        default = inspect.signature(run).parameters[argument].default
+        options = _choices(argument)
+        for value in (default if isinstance(default, list) else [default]):
+            assert value in options, (argument, value)
+
+
 # ---------------------------------------------------------------------------
 # Mode detection
 # ---------------------------------------------------------------------------
 
 def test_a_single_volume_is_cbct(tmp_path):
     scan = write_volume(tmp_path / "in" / "patient01.nii.gz")
-    detected = ALILogic.detect(scan, str(tmp_path / "scratch"))
-    assert detected.mode == ALILogic.CBCT
+    detected = dispatch.detect(scan, str(tmp_path / "work"))
+    assert detected.mode == dispatch.CBCT
     assert detected.scans == [(scan, "patient01.nii.gz")]
 
 
 def test_a_single_surface_is_ios(tmp_path):
     mesh = write_surface(tmp_path / "in" / "arch.vtk")
-    detected = ALILogic.detect(mesh, str(tmp_path / "scratch"))
-    assert detected.mode == ALILogic.IOS
+    detected = dispatch.detect(mesh, str(tmp_path / "work"))
+    assert detected.mode == dispatch.IOS
 
 
-def test_a_zip_of_volumes_is_cbct_and_keeps_its_tree(tmp_path):
-    """A .zip says nothing about which engine applies -- which is exactly why
-    there is no `mode` argument for the caller to get wrong."""
+def test_a_folder_of_volumes_is_cbct_and_keeps_its_tree(tmp_path):
+    """A folder says nothing about which engine applies -- which is exactly why
+    there is no `mode` argument for the caller to get wrong.
+
+    The server unpacks a `.zip` before `run()` is called, so what arrives here
+    is always a real directory; this is the shape it arrives in.
+    """
     write_volume(tmp_path / "cohort" / "siteA" / "patient01.nii.gz")
     write_volume(tmp_path / "cohort" / "siteB" / "patient01.nii.gz")
 
-    archive = tmp_path / "cohort.zip"
-    with zipfile.ZipFile(archive, "w") as zf:
-        for root, _dirs, files in os.walk(tmp_path / "cohort"):
-            for name in files:
-                path = os.path.join(root, name)
-                zf.write(path, os.path.relpath(path, tmp_path / "cohort"))
-
-    detected = ALILogic.detect(str(archive), str(tmp_path / "scratch"))
-    assert detected.mode == ALILogic.CBCT
+    detected = dispatch.detect(str(tmp_path / "cohort"), str(tmp_path / "work"))
+    assert detected.mode == dispatch.CBCT
     # Two patients with the SAME base name in different folders. Keyed by
     # relative path, they stay distinct; the original keyed by file.name and
     # one silently replaced the other.
@@ -249,8 +301,8 @@ def test_a_mixed_input_is_refused_rather_than_guessed(tmp_path):
     write_volume(tmp_path / "mixed" / "patient01.nii.gz")
     write_surface(tmp_path / "mixed" / "arch.vtk")
 
-    with pytest.raises(ToolArgumentError) as raised:
-        ALILogic.detect(str(tmp_path / "mixed"), str(tmp_path / "scratch"))
+    with pytest.raises(ToolInputError) as raised:
+        dispatch.detect(str(tmp_path / "mixed"), str(tmp_path / "work"))
     assert "mixes" in str(raised.value)
 
 
@@ -258,21 +310,32 @@ def test_an_input_with_nothing_recognizable_says_what_it_wanted(tmp_path):
     (tmp_path / "empty").mkdir()
     (tmp_path / "empty" / "notes.txt").write_text("nothing here")
 
-    with pytest.raises(ToolArgumentError) as raised:
-        ALILogic.detect(str(tmp_path / "empty"), str(tmp_path / "scratch"))
+    with pytest.raises(ToolInputError) as raised:
+        dispatch.detect(str(tmp_path / "empty"), str(tmp_path / "work"))
     assert ".vtk" in str(raised.value) and ".nii.gz" in str(raised.value)
 
 
 def test_detection_is_recursive(tmp_path):
     write_volume(tmp_path / "deep" / "a" / "b" / "c" / "patient.nii.gz")
-    detected = ALILogic.detect(str(tmp_path / "deep"), str(tmp_path / "scratch"))
+    detected = dispatch.detect(str(tmp_path / "deep"), str(tmp_path / "work"))
     assert len(detected.scans) == 1
+
+
+def test_the_working_directory_is_not_rediscovered_as_input(tmp_path):
+    """`output_dir` may legitimately be the input folder, and `.ali_work/`
+    lives inside it. Its converted DICOM must not come back round as scans."""
+    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
+    stale = tmp_path / "cohort" / dispatch.WORK_DIRNAME / "dicom_converted"
+    write_volume(stale / "leftover.nii.gz")
+
+    detected = dispatch.detect(str(tmp_path / "cohort"), str(tmp_path / "work"))
+    assert [key for _path, key in detected.scans] == ["patient01.nii.gz"]
 
 
 def test_a_folder_of_dicom_is_not_mistaken_for_an_empty_input(tmp_path, monkeypatch):
     """DICOM slices carry no extension, so only GDCM can recognize them --
     which is why the client offers a folder picker and why detection probes."""
-    from tools.ALI.src.ALI_CBCT import preprocess
+    from sadt_ali.cbct import preprocess
 
     series = tmp_path / "cohort" / "patient01"
     series.mkdir(parents=True)
@@ -286,18 +349,18 @@ def test_a_folder_of_dicom_is_not_mistaken_for_an_empty_input(tmp_path, monkeypa
         lambda directory, destination: write_volume(destination),
     )
 
-    detected = ALILogic.detect(str(tmp_path / "cohort"), str(tmp_path / "scratch"))
-    assert detected.mode == ALILogic.CBCT
+    detected = dispatch.detect(str(tmp_path / "cohort"), str(tmp_path / "work"))
+    assert detected.mode == dispatch.CBCT
     assert detected.converted_dicom == 1
-    # Converted into the SCRATCH dir, never into the user's own folder -- the
+    # Converted into the WORKING dir, never into the user's own folder -- the
     # original wrote <input>/NIFTI/ and then re-ingested it on the next run.
     converted_path = detected.scans[0][0]
-    assert str(tmp_path / "scratch") in converted_path
+    assert str(tmp_path / "work") in converted_path
     assert not (tmp_path / "cohort" / "NIFTI").exists()
 
 
 def test_a_folder_already_holding_volumes_is_not_probed_for_dicom(tmp_path, monkeypatch):
-    from tools.ALI.src.ALI_CBCT import preprocess
+    from sadt_ali.cbct import preprocess
 
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
     probed = []
@@ -305,7 +368,7 @@ def test_a_folder_already_holding_volumes_is_not_probed_for_dicom(tmp_path, monk
         preprocess, "is_dicom_series", lambda directory: probed.append(directory) or False
     )
 
-    ALILogic.detect(str(tmp_path / "cohort"), str(tmp_path / "scratch"))
+    dispatch.detect(str(tmp_path / "cohort"), str(tmp_path / "work"))
     assert probed == []
 
 
@@ -314,7 +377,7 @@ def test_a_folder_already_holding_volumes_is_not_probed_for_dicom(tmp_path, monk
 # ---------------------------------------------------------------------------
 
 def test_weight_discovery_reads_the_folder_tree(tmp_path):
-    from tools.ALI.src.ALI_CBCT import engine as cbct_engine
+    from sadt_ali.cbct import engine as cbct_engine
 
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba", "S"]})
     weights = cbct_engine.discover_weights(bundle)
@@ -326,7 +389,7 @@ def test_weight_discovery_reads_the_folder_tree(tmp_path):
 def test_a_landmark_missing_one_scale_is_not_offered(tmp_path):
     """Half a bundle must be reported up front, not fail mid-run: the agent
     walks the coarse scale and then the fine one, and needs both."""
-    from tools.ALI.src.ALI_CBCT import engine as cbct_engine
+    from sadt_ali.cbct import engine as cbct_engine
 
     folder = tmp_path / "bundle" / "Ba" / "1"
     folder.mkdir(parents=True)
@@ -336,7 +399,7 @@ def test_a_landmark_missing_one_scale_is_not_offered(tmp_path):
 
 
 def test_requested_landmarks_separates_missing_from_unknown(tmp_path):
-    from tools.ALI.src.ALI_CBCT import engine as cbct_engine
+    from sadt_ali.cbct import engine as cbct_engine
 
     weights = {"Ba": {}, "S": {}, "Mystery": {}}
     runnable, without_model, ungrouped = cbct_engine.requested_landmarks(weights, ["CB"])
@@ -351,7 +414,7 @@ def test_requested_landmarks_separates_missing_from_unknown(tmp_path):
 
 
 def test_a_bundle_using_the_ui_spelling_resolves(tmp_path):
-    from tools.ALI.src.ALI_CBCT import engine as cbct_engine
+    from sadt_ali.cbct import engine as cbct_engine
 
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Canine": ["UR3OI"]})
     weights = cbct_engine.discover_weights(bundle)
@@ -362,8 +425,25 @@ def test_a_bundle_using_the_ui_spelling_resolves(tmp_path):
     assert ungrouped == []
 
 
+def test_a_bundle_of_the_wrong_kind_is_an_input_error(tmp_path, cbct_environment):
+    """Naming the IOS bundle for a CBCT run (or vice versa) has to answer with
+    a message the client shows verbatim, not a stack trace in a log."""
+    from sadt_ali.cbct import engine as cbct_engine
+
+    ios_bundle = write_ios_bundle(tmp_path / "ios", ["Upper_O_model.pth"])
+    with pytest.raises(ToolInputError, match="No CBCT landmark weights"):
+        cbct_engine.predict_landmarks(
+            scans=[],
+            model_path=ios_bundle,
+            regions=None,
+            prediction_ID="Pred",
+            output_dir=str(tmp_path / "out"),
+            work_dir=str(tmp_path / "work"),
+        )
+
+
 # ---------------------------------------------------------------------------
-# IOS model bundles
+# IOS model bundles and the tooth-label precondition
 # ---------------------------------------------------------------------------
 
 def test_ios_weight_discovery_reads_the_published_names(tmp_path):
@@ -391,106 +471,30 @@ def test_an_ios_checkpoint_with_no_jaw_token_is_reported_not_assumed_upper(tmp_p
     assert weights["C"] == {"Upper": str(tmp_path / "bundle" / "Upper_C_model.pth")}
 
 
-def test_ios_network_codes_from_a_selection():
-    selection = Selection({"Occlusal": True, "Cervical": False})
-    assert ios_catalog.network_codes(selection) == ("O",)
-    assert ios_catalog.network_codes(None) == ios_catalog.NETWORK_CODES
+def test_a_mesh_without_tooth_labels_names_the_tool_that_makes_them(tmp_path):
+    """The handoff `ALILogic.ensure_segmented()` used to make in-process.
+
+    Tools do not call each other any more, so this cannot segment the mesh
+    itself -- but it can say exactly what to run, which is the difference
+    between a fixable request and "no known tooth number is present".
+    """
+    labelled = write_surface(tmp_path / "in" / "good.vtk", labelled=True)
+    raw = write_surface(tmp_path / "in" / "raw.vtk", labelled=False)
+
+    with pytest.raises(ToolInputError) as raised:
+        ios_engine.require_labels([(labelled, "good.vtk"), (raw, "raw.vtk")])
+
+    message = str(raised.value)
+    assert "Crown_Seg" in message
+    assert "1 of 2" in message
+    # The array names it looked for, so the fix is actionable without reading
+    # the source.
+    assert "Universal_ID" in message
 
 
-# ---------------------------------------------------------------------------
-# Model bundle auto-selection (the `model` argument is optional)
-# ---------------------------------------------------------------------------
-
-class FakeStore:
-    """A data_store stub mapping name -> (path, is_temporary)."""
-
-    def __init__(self, entries: dict):
-        self.entries = entries
-
-    def list_models(self, tool_name):
-        assert tool_name == "ALI"
-        return sorted(self.entries)
-
-    def resolve_model(self, tool_name, name):
-        path, is_temporary = self.entries[name]
-        return ALILogic.ResolvedFile(path=str(path), is_temporary=is_temporary)
-
-
-def test_the_bundle_is_picked_from_the_detected_mode(tmp_path, monkeypatch):
-    """No `model` in the request: the bundle whose LAYOUT matches the mode runs."""
-    cbct = write_cbct_bundle(tmp_path / "ALI_CBCT_Models", {"Cranial_Base": ["Ba"]})
-    ios = write_ios_bundle(
-        tmp_path / "ALI_IOS_Models", ["Upper_O_model.pth", "Lower_O_model.pth"]
-    )
-    monkeypatch.setattr(
-        ALILogic,
-        "data_store",
-        FakeStore({"ALI_CBCT_Models": (cbct, False), "ALI_IOS_Models": (ios, False)}),
-    )
-
-    assert ALILogic.select_bundle(ALILogic.CBCT).path == cbct
-    assert ALILogic.select_bundle(ALILogic.IOS).path == ios
-
-
-def test_no_hosted_bundle_is_a_422_naming_the_setup_script(monkeypatch):
-    monkeypatch.setattr(ALILogic, "data_store", FakeStore({}))
-    with pytest.raises(ToolArgumentError, match="setup-models.sh"):
-        ALILogic.select_bundle(ALILogic.IOS)
-
-
-def test_a_mode_with_no_matching_bundle_is_a_422_naming_the_mode(tmp_path, monkeypatch):
-    cbct = write_cbct_bundle(tmp_path / "ALI_CBCT_Models", {"Cranial_Base": ["Ba"]})
-    monkeypatch.setattr(
-        ALILogic, "data_store", FakeStore({"ALI_CBCT_Models": (cbct, False)})
-    )
-    with pytest.raises(ToolArgumentError, match="IOS"):
-        ALILogic.select_bundle(ALILogic.IOS)
-
-
-def test_two_matching_bundles_are_a_422_not_a_silent_pick(tmp_path, monkeypatch):
-    """Which model vintage ran must never be a surprise."""
-    first = write_ios_bundle(tmp_path / "ALIDDM_2023", ["Upper_O_model.pth"])
-    second = write_ios_bundle(tmp_path / "ALIDDM_2026", ["Upper_O_model.pth"])
-    monkeypatch.setattr(
-        ALILogic,
-        "data_store",
-        FakeStore({"ALIDDM_2023": (first, False), "ALIDDM_2026": (second, False)}),
-    )
-    with pytest.raises(ToolArgumentError) as excinfo:
-        ALILogic.select_bundle(ALILogic.IOS)
-    assert "ALIDDM_2023" in str(excinfo.value) and "ALIDDM_2026" in str(excinfo.value)
-
-
-def test_a_temporary_probe_copy_is_removed(tmp_path, monkeypatch):
-    """A backend temp copy probed and not selected must not leak on disk."""
-    cbct = write_cbct_bundle(tmp_path / "cbct", {"Cranial_Base": ["Ba"]})
-    ios = write_ios_bundle(tmp_path / "ios", ["Upper_O_model.pth"])
-    monkeypatch.setattr(
-        ALILogic, "data_store", FakeStore({"cbct": (cbct, True), "ios": (ios, False)})
-    )
-
-    selected = ALILogic.select_bundle(ALILogic.IOS)
-
-    assert selected.path == ios
-    assert not os.path.exists(cbct)
-
-
-def test_a_bundle_of_the_wrong_kind_is_an_argument_error(tmp_path, cbct_environment):
-    """The mismatch that used to be a 500: naming the IOS bundle for a CBCT
-    run (or vice versa) must answer 422, whose message Slicer shows verbatim
-    -- a 500 buries it in the server log."""
-    from tools.ALI.src.ALI_CBCT import engine as cbct_engine
-
-    ios_bundle = write_ios_bundle(tmp_path / "ios", ["Upper_O_model.pth"])
-    with pytest.raises(ToolArgumentError, match="No CBCT landmark weights"):
-        cbct_engine.predict_landmarks(
-            scans=[],
-            model_path=ios_bundle,
-            regions=None,
-            prediction_ID="Pred",
-            output_dir=str(tmp_path / "out"),
-            scratch_dir=str(tmp_path / "scratch"),
-        )
+def test_a_fully_labelled_batch_passes_the_check(tmp_path):
+    mesh = write_surface(tmp_path / "in" / "arch.vtk", labelled=True)
+    assert ios_engine.require_labels([(mesh, "arch.vtk")]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -555,73 +559,94 @@ def test_positions_are_plain_json_floats(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# End to end, agent stubbed
+# End to end through run(), agent stubbed
 # ---------------------------------------------------------------------------
-
-@pytest.fixture
-def cbct_environment():
-    pytest.importorskip("monai")
-    pytest.importorskip("itk")
-    pytest.importorskip("torch")
-
 
 def test_a_cbct_run_writes_one_file_per_scan(tmp_path, stub_agent, cbct_environment):
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba", "S", "N"]})
 
-    report = ALILogic.identify(
-        input_path=str(tmp_path / "cohort"),
-        model_path=bundle,
-        cbct_regions=Selection(
-            {"Cranial base": True, "Upper": False, "Lower": False, "Impacted canine": False}
-        ),
-        scratch_dir=str(tmp_path / "scratch"),
+    output_dir = run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        cbct_regions=CRANIAL_BASE_ONLY,
     )
 
+    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
     assert report["mode"] == "CBCT"
     assert report["summary"] == {"total": 1, "processed": 1, "failed": 0}
 
-    produced = [
-        os.path.join(root, name)
-        for root, _dirs, files in os.walk(report["output_dir"])
-        for name in files
-        if name.endswith(".mrk.json")
-    ]
+    produced = sorted(output_dir.rglob("*.mrk.json"))
     # ONE file holding every region, not one per anatomical group -- which is
     # what every downstream tool (ASO, AREG, AutoMatrix) had to recombine.
     assert len(produced) == 1
-    assert os.path.basename(produced[0]) == "patient01_lm_Pred.mrk.json"
+    assert produced[0].name == "patient01_lm_Pred.mrk.json"
 
-    content = json.loads(open(produced[0], encoding="utf-8").read())
+    content = json.loads(produced[0].read_text())
     assert sorted(point["label"] for point in content["markups"][0]["controlPoints"]) == [
         "Ba", "N", "S"
     ]
 
 
-def test_a_cbct_run_with_no_model_uses_the_matching_bundle(
-    tmp_path, monkeypatch, stub_agent, cbct_environment
-):
-    """End to end without `model`: the data picks the engine, the engine's
-    layout picks the bundle, and the report says which one ran."""
+def test_run_returns_the_output_directory(tmp_path, stub_agent, cbct_environment):
+    """The contract describe.py publishes as `"returns": "path"`."""
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
-    cbct = write_cbct_bundle(tmp_path / "ALI_CBCT_Models", {"Cranial_Base": ["Ba"]})
-    ios = write_ios_bundle(tmp_path / "ALI_IOS_Models", ["Upper_O_model.pth"])
-    monkeypatch.setattr(
-        ALILogic,
-        "data_store",
-        FakeStore({"ALI_CBCT_Models": (cbct, False), "ALI_IOS_Models": (ios, False)}),
+    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
+
+    returned = run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        cbct_regions=CRANIAL_BASE_ONLY,
+    )
+    assert returned == tmp_path / "out"
+    assert returned.is_dir()
+
+
+def test_nothing_is_written_beside_the_input(tmp_path, stub_agent, cbct_environment):
+    """Everything goes under `output_dir`, which the caller owns."""
+    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
+    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
+    before = sorted(p for p in (tmp_path / "cohort").rglob("*") if p.is_file())
+
+    run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        cbct_regions=CRANIAL_BASE_ONLY,
     )
 
-    report = ALILogic.identify(
-        input_path=str(tmp_path / "cohort"),
-        cbct_regions=Selection(
-            {"Cranial base": True, "Upper": False, "Lower": False, "Impacted canine": False}
-        ),
-        scratch_dir=str(tmp_path / "scratch"),
-    )
+    assert sorted(p for p in (tmp_path / "cohort").rglob("*") if p.is_file()) == before
 
-    assert report["summary"]["processed"] == 1
-    assert report["model_bundle"] == "ALI_CBCT_Models"
+
+def test_the_working_directory_does_not_survive_the_run(tmp_path, stub_agent, cbct_environment):
+    """A leftover `.ali_work/` means a run crashed, so it has to be reliable."""
+    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
+    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
+
+    output_dir = run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        cbct_regions=CRANIAL_BASE_ONLY,
+    )
+    assert not (output_dir / dispatch.WORK_DIRNAME).exists()
+
+
+def test_the_working_directory_is_removed_even_when_the_run_fails(tmp_path, cbct_environment):
+    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
+    empty_bundle = tmp_path / "bundle"
+    empty_bundle.mkdir()
+
+    with pytest.raises(ToolInputError):
+        run(
+            input=tmp_path / "cohort",
+            model=empty_bundle,
+            output_dir=tmp_path / "out",
+            cbct_regions=CRANIAL_BASE_ONLY,
+        )
+    assert not (tmp_path / "out" / dispatch.WORK_DIRNAME).exists()
 
 
 def test_a_batch_keeps_its_tree_so_homonyms_cannot_collide(
@@ -631,26 +656,18 @@ def test_a_batch_keeps_its_tree_so_homonyms_cannot_collide(
     write_volume(tmp_path / "cohort" / "siteB" / "patient01.nii.gz")
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
 
-    report = ALILogic.identify(
-        input_path=str(tmp_path / "cohort"),
-        model_path=bundle,
-        cbct_regions=Selection(
-            {"Cranial base": True, "Upper": False, "Lower": False, "Impacted canine": False}
-        ),
-        scratch_dir=str(tmp_path / "scratch"),
+    output_dir = run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        cbct_regions=CRANIAL_BASE_ONLY,
     )
 
-    produced = sorted(
-        os.path.relpath(os.path.join(root, name), report["output_dir"])
-        for root, _dirs, files in os.walk(report["output_dir"])
-        for name in files
-        if name.endswith(".mrk.json")
-    )
+    produced = sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*.mrk.json"))
     assert produced == [
         os.path.join("siteA", "patient01_lm_Pred.mrk.json"),
         os.path.join("siteB", "patient01_lm_Pred.mrk.json"),
     ]
-    assert report["summary"]["processed"] == 2
 
 
 def test_the_report_tells_a_missing_model_from_a_failed_search(
@@ -660,27 +677,25 @@ def test_the_report_tells_a_missing_model_from_a_failed_search(
     is simply not there -- and need opposite fixes: another bundle, or another
     scan. The report is the only place they are distinguishable."""
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
-    # "Xanadu" is not in the catalog but IS in the bundle, so the stub agent
-    # runs it and fails it; "S" is in the catalog but not in the bundle.
+    # "XBa" is not in the catalog but IS in the bundle, so it is reported as
+    # ungrouped and never run; "S" is in the catalog but not in the bundle.
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
     for scale in cbct_catalog.SCALE_KEYS:
         folder = tmp_path / "bundle" / "Cranial_Base" / "XBa" / scale
         folder.mkdir(parents=True)
         (folder / "x.pth").write_bytes(b"fake")
 
-    report = ALILogic.identify(
-        input_path=str(tmp_path / "cohort"),
-        model_path=bundle,
-        cbct_regions=Selection(
-            {"Cranial base": True, "Upper": False, "Lower": False, "Impacted canine": False}
-        ),
-        scratch_dir=str(tmp_path / "scratch"),
+    output_dir = run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        cbct_regions=CRANIAL_BASE_ONLY,
     )
+    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
 
     scan = report["scans"]["patient01.nii.gz"]
     assert scan["landmarks_found"] == ["Ba"]
     assert "S" in report["landmarks_without_model"]
-    # XBa has weights, is unknown to the catalog, and is therefore never run.
     assert report["landmarks_ungrouped"] == ["XBa"]
     assert scan["landmarks_failed"] == {}
 
@@ -700,17 +715,16 @@ def test_a_landmark_that_never_converges_does_not_cost_the_others(
         (folder / "x.pth").write_bytes(b"fake")
     cbct_catalog.LABEL_GROUPS["XN"] = "CB"
     try:
-        report = ALILogic.identify(
-            input_path=str(tmp_path / "cohort"),
-            model_path=bundle,
-            cbct_regions=Selection(
-                {"Cranial base": True, "Upper": False, "Lower": False, "Impacted canine": False}
-            ),
-            scratch_dir=str(tmp_path / "scratch"),
+        output_dir = run(
+            input=tmp_path / "cohort",
+            model=bundle,
+            output_dir=tmp_path / "out",
+            cbct_regions=CRANIAL_BASE_ONLY,
         )
     finally:
         del cbct_catalog.LABEL_GROUPS["XN"]
 
+    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
     scan = report["scans"]["patient01.nii.gz"]
     assert scan["status"] == "ok"
     assert scan["landmarks_found"] == ["Ba"]
@@ -722,19 +736,18 @@ def test_the_run_report_lands_beside_the_results(tmp_path, stub_agent, cbct_envi
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
 
-    report = ALILogic.identify(
-        input_path=str(tmp_path / "cohort"),
-        model_path=bundle,
-        scratch_dir=str(tmp_path / "scratch"),
+    output_dir = run(
+        input=tmp_path / "cohort", model=bundle, output_dir=tmp_path / "out"
     )
 
-    # The Slicer module reads exactly this file, by this name, from the
-    # unpacked archive.
-    on_disk = os.path.join(report["output_dir"], ALILogic.REPORT_NAME)
-    assert os.path.isfile(on_disk)
-    written = json.loads(open(on_disk, encoding="utf-8").read())
+    # The Slicer module reads exactly this file, by this name.
+    on_disk = output_dir / dispatch.REPORT_NAME
+    assert on_disk.is_file()
+    written = json.loads(on_disk.read_text())
     assert written["mode"] == "CBCT"
     assert written["regions"]
+    # So a result says which weights produced it.
+    assert written["model_bundle"] == "bundle"
 
 
 def test_prediction_id_reaches_the_file_names(tmp_path, stub_agent, cbct_environment):
@@ -743,33 +756,42 @@ def test_prediction_id_reaches_the_file_names(tmp_path, stub_agent, cbct_environ
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
 
-    report = ALILogic.identify(
-        input_path=str(tmp_path / "cohort"),
-        model_path=bundle,
+    output_dir = run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
         prediction_ID="T1",
-        scratch_dir=str(tmp_path / "scratch"),
     )
-    produced = [
-        name
-        for _root, _dirs, files in os.walk(report["output_dir"])
-        for name in files
-        if name.endswith(".mrk.json")
-    ]
-    assert produced == ["patient01_lm_T1.mrk.json"]
+    assert [p.name for p in output_dir.rglob("*.mrk.json")] == ["patient01_lm_T1.mrk.json"]
 
 
 # ---------------------------------------------------------------------------
-# A missing dependency belongs to the server, not to a scan
+# `search_seconds` -- the setting that became an argument
+# ---------------------------------------------------------------------------
+
+def test_the_search_budget_defaults_per_device():
+    """0 means "not specified": there is no nullable type in the schema, so the
+    argument cannot default to None the way the setting it replaces did."""
+    from sadt_ali.cbct import engine as cbct_engine
+
+    assert cbct_engine.search_budget("cuda", 0.0) == 15.0
+    # CPU inference needs several times longer to reach the same place.
+    assert cbct_engine.search_budget("cpu", 0.0) == 60.0
+    assert cbct_engine.search_budget("cuda", 2.5) == 2.5
+
+
+# ---------------------------------------------------------------------------
+# A missing dependency belongs to the venv, not to a scan
 # ---------------------------------------------------------------------------
 
 def test_a_missing_dependency_fails_before_any_scan_is_touched(tmp_path, monkeypatch):
-    """Regression: `itk` absent from the deployment produced one identical
-    failure PER SCAN -- each only after a full histogram correction -- and the
-    run then ended on "produced no landmarks for any scan", which buried the
-    one line saying what to install. It is a property of the server; it has to
-    be raised once, before the loop."""
-    from tools.ALI.src.ALI_CBCT import engine as cbct_engine
-    from tools.ALI.src.ALI_CBCT import preprocess
+    """Regression: `itk` absent produced one identical failure PER SCAN -- each
+    only after a full histogram correction -- and the run then ended on
+    "produced no landmarks for any scan", which buried the one line saying what
+    to install. It is a property of the venv; it has to be raised once, before
+    the loop."""
+    from sadt_ali.cbct import engine as cbct_engine
+    from sadt_ali.cbct import preprocess
 
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
     write_volume(tmp_path / "cohort" / "patient02.nii.gz")
@@ -785,8 +807,6 @@ def test_a_missing_dependency_fails_before_any_scan_is_touched(tmp_path, monkeyp
         lambda *args, **kwargs: corrected.append(args) or args[1],
     )
 
-    # ToolUnavailableError, not RuntimeError: main.py maps it to 501 with the
-    # message, so the caller reads "install itk" instead of a blank 500.
     with pytest.raises(ToolUnavailableError) as raised:
         cbct_engine.predict_landmarks(
             scans=[(str(tmp_path / "cohort" / "patient01.nii.gz"), "patient01.nii.gz"),
@@ -794,7 +814,7 @@ def test_a_missing_dependency_fails_before_any_scan_is_touched(tmp_path, monkeyp
             model_path=bundle,
             regions=("CB",),
             output_dir=str(tmp_path / "out"),
-            scratch_dir=str(tmp_path / "scratch"),
+            work_dir=str(tmp_path / "work"),
         )
 
     # The install message itself, not a summary that hides it.
@@ -805,24 +825,22 @@ def test_a_missing_dependency_fails_before_any_scan_is_touched(tmp_path, monkeyp
 
 
 # ---------------------------------------------------------------------------
-# Cross-argument rules -- the 422s
+# Cross-argument rules the schema cannot express
 # ---------------------------------------------------------------------------
 
 def test_an_empty_cbct_selection_on_cbct_input_names_the_argument(tmp_path):
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
 
-    with pytest.raises(ToolArgumentError) as raised:
-        ALILogic.identify(
-            input_path=str(tmp_path / "cohort"),
-            model_path=str(tmp_path),
-            cbct_regions=Selection(
-                {"Cranial base": False, "Upper": False, "Lower": False, "Impacted canine": False}
-            ),
-            scratch_dir=str(tmp_path / "scratch"),
+    with pytest.raises(ToolInputError) as raised:
+        run(
+            input=tmp_path / "cohort",
+            model=tmp_path,
+            output_dir=tmp_path / "out",
+            cbct_regions=[],
         )
     message = str(raised.value)
     assert "CBCT" in message and "cbct_regions" in message
-    # The 422 lists what to tick, so a mode mismatch explains itself.
+    # The message lists what to tick, so a mode mismatch explains itself.
     for name in cbct_catalog.REGION_NAMES:
         assert name in message
 
@@ -830,12 +848,12 @@ def test_an_empty_cbct_selection_on_cbct_input_names_the_argument(tmp_path):
 def test_an_empty_ios_selection_on_ios_input_names_the_argument(tmp_path):
     write_surface(tmp_path / "cohort" / "arch.vtk")
 
-    with pytest.raises(ToolArgumentError) as raised:
-        ALILogic.identify(
-            input_path=str(tmp_path / "cohort"),
-            model_path=str(tmp_path),
-            ios_networks=Selection({"Occlusal": False, "Cervical": False}),
-            scratch_dir=str(tmp_path / "scratch"),
+    with pytest.raises(ToolInputError) as raised:
+        run(
+            input=tmp_path / "cohort",
+            model=tmp_path,
+            output_dir=tmp_path / "out",
+            ios_networks=[],
         )
     message = str(raised.value)
     assert "ios_networks" in message and "Occlusal" in message
@@ -843,57 +861,18 @@ def test_an_empty_ios_selection_on_ios_input_names_the_argument(tmp_path):
 
 def test_the_inactive_modes_empty_selection_is_ignored(tmp_path, stub_agent, cbct_environment):
     """Both groups are always rendered by the client and one is always inert.
-    Unticking the inert one must not fail the run."""
+    Emptying the inert one must not fail the run."""
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
 
-    report = ALILogic.identify(
-        input_path=str(tmp_path / "cohort"),
-        model_path=bundle,
-        ios_networks=Selection({"Occlusal": False, "Cervical": False}),
-        scratch_dir=str(tmp_path / "scratch"),
+    output_dir = run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        ios_networks=[],
     )
+    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
     assert report["mode"] == "CBCT"
-
-
-# ---------------------------------------------------------------------------
-# The schema itself -- the contract the Slicer client is written against
-# ---------------------------------------------------------------------------
-
-def test_the_schema_is_valid_and_has_no_mode_argument():
-    tool = ALITool()
-    tool.check_schema()
-    assert sorted(tool.arguments) == [
-        "cbct_regions", "input", "ios_networks", "landmarks", "model", "prediction_ID"
-    ]
-    assert "mode" not in tool.arguments
-
-
-def test_input_accepts_both_kinds_and_the_model_is_name_only():
-    tool = ALITool()
-    assert tool.arguments["input"].types == ("volume_or_zip_file", "surface_or_zip_file")
-    assert set(tool.arguments["input"].extensions) == {
-        ".nii", ".nii.gz", ".nrrd", ".nrrd.gz", ".gipl", ".gipl.gz", ".vtk", ".stl", ".zip"
-    }
-    # ".zip" is declared by both types and must appear once, or the client's
-    # file dialog repeats it in its filter string.
-    assert len(tool.arguments["input"].extensions) == len(set(tool.arguments["input"].extensions))
-
-    model = tool.arguments["model"]
-    assert model.type is str and model.server_selectable == "model"
-    assert not model.is_file
-
-
-def test_both_selections_are_optional_so_neither_blocks_the_other_mode():
-    tool = ALITool()
-    assert not tool.arguments["cbct_regions"].required
-    assert not tool.arguments["ios_networks"].required
-    for name in ("cbct_regions", "ios_networks"):
-        assert name.split("_")[0].upper() in tool.arguments[name].description
-
-
-def test_the_output_is_a_bundle_of_files():
-    assert ALITool().output_kind == "files"
 
 
 # ---------------------------------------------------------------------------
@@ -903,14 +882,6 @@ def test_the_output_is_a_bundle_of_files():
 # What ASO's fully-automated CBCT mode registers on. Straddles two regions,
 # which is the whole reason this argument exists.
 ASO_LANDMARKS = ("Ba", "S", "N", "RPo", "LPo", "ROr", "LOr")
-
-
-def _cbct_engine():
-    """Imported inside each test, like everywhere else in this file: the CBCT
-    engine pulls in torch and SimpleITK at import time."""
-    from tools.ALI.src.ALI_CBCT import engine
-
-    return engine
 
 
 def _weights_for(labels):
@@ -926,7 +897,8 @@ def test_naming_landmarks_replaces_the_region_selection():
     every landmark of both (58) to use seven, and one agent is a full two-scale
     walk of the volume.
     """
-    engine = _cbct_engine()
+    from sadt_ali.cbct import engine
+
     weights = _weights_for(cbct_catalog.LABELS)
 
     by_region, _missing, _ungrouped = engine.requested_landmarks(
@@ -943,10 +915,10 @@ def test_naming_landmarks_replaces_the_region_selection():
 
 
 def test_an_empty_landmark_selection_leaves_the_regions_in_charge():
-    """Every request written before this argument existed keeps its meaning:
-    an omitted multichoice arrives as its declared defaults, and those are all
-    off."""
-    engine = _cbct_engine()
+    """The ordinary case, and the default: an empty list means "not specified"
+    and hands the choice back to `cbct_regions`."""
+    from sadt_ali.cbct import engine
+
     weights = _weights_for(cbct_catalog.LABELS)
 
     without = engine.requested_landmarks(weights, regions=("CB",))
@@ -959,7 +931,8 @@ def test_an_empty_landmark_selection_leaves_the_regions_in_charge():
 def test_a_named_landmark_the_bundle_lacks_is_reported_not_dropped():
     """Same contract as the region path: "use another bundle" has to be
     distinguishable from "this scan is hard"."""
-    engine = _cbct_engine()
+    from sadt_ali.cbct import engine
+
     weights = _weights_for(("Ba", "S", "N"))
 
     runnable, without_model, _ungrouped = engine.requested_landmarks(
@@ -971,91 +944,33 @@ def test_a_named_landmark_the_bundle_lacks_is_reported_not_dropped():
 
 
 def test_landmark_names_accepts_every_shape_a_caller_uses():
-    # The HTTP path (a Selection), a plain list from another server-side tool,
-    # and the omitted argument.
-    assert cbct_catalog.landmark_names({"Ba": True, "S": False, "N": True}) == ("Ba", "N")
     assert cbct_catalog.landmark_names(["N", "Ba"]) == ("Ba", "N")  # declaration order
     assert cbct_catalog.landmark_names(None) == ()
-    assert cbct_catalog.landmark_names({}) == ()
+    assert cbct_catalog.landmark_names([]) == ()
     # Aliases resolve to the spelling the weights are packaged under.
     assert cbct_catalog.landmark_names(["UR3OI"]) == ("UR3OIP",)
+    # A name outside the catalog is kept, not refused: the engine runs it if
+    # the bundle has weights for it, and reports it as ungrouped otherwise.
+    assert cbct_catalog.landmark_names(["Ba", "Mystery"]) == ("Ba", "Mystery")
 
 
-def test_the_landmark_tabs_are_the_engines_own_grouping():
-    """Published, not restated: the client renders the same table the engine
-    names its output files by, so a landmark added to GROUP_LABELS appears in
-    its tab with no client release."""
-    tool = ALITool()
-    spec = tool.arguments["landmarks"]
+def test_only_the_named_landmarks_run(tmp_path, stub_agent, cbct_environment):
+    """End to end: the seven points ASO needs, from a bundle holding more."""
+    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
+    bundle = write_cbct_bundle(
+        tmp_path / "bundle", {"Cranial_Base": list(ASO_LANDMARKS) + ["C2", "C3"]}
+    )
 
-    assert spec.ui == "tabs"
-    assert set(spec.groups) == set(cbct_catalog.REGION_NAMES)
-    for display, code in cbct_catalog.REGION_NAMES.items():
-        assert tuple(spec.groups[display]) == tuple(cbct_catalog.GROUP_LABELS[code])
-    # Every grouped option is one the argument actually offers.
-    for options in spec.groups.values():
-        assert set(options) <= set(spec.choices)
+    output_dir = run(
+        input=tmp_path / "cohort",
+        model=bundle,
+        output_dir=tmp_path / "out",
+        landmarks=list(ASO_LANDMARKS),
+    )
+    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
 
-
-def test_landmarks_start_all_off_so_the_regions_keep_deciding():
-    spec = ALITool().arguments["landmarks"]
-    assert set(spec.choices.values()) == {False}
-    assert not spec.required
-
-
-# ---------------------------------------------------------------------------
-# The contract another server-side tool drives this one through
-# ---------------------------------------------------------------------------
-
-def test_the_schema_exposes_what_aso_drives_it_with():
-    """ASO's fully-automated CBCT mode calls `tool.invoke` in-process (never
-    over HTTP -- that would deadlock its own concurrency limiter) and checks
-    these three argument names up front, so a drift here is one clear message
-    instead of a 422 from inside another tool.
-
-    Guarded here rather than in ASO's suite because it is THIS schema that has
-    to keep the promise, and the two tools live on separate branches until
-    both land.
-    """
-    tool = ALITool()
-    for name in ("input", "model", "landmarks"):
-        assert name in tool.arguments, name
-    # ASO also sets it when present, and ALI must keep accepting that.
-    assert "prediction_ID" in tool.arguments
-
-
-def test_the_aso_selection_validates_and_survives_coercion():
-    """The exact args ASO builds, through the same entry point main.py uses.
-
-    `input` arrives as an already-resolved DIRECTORY (ASO hands over the folder
-    it extracted, not an upload), the model as a local path, and the landmark
-    selection as a partial mapping -- every option ASO did not name must come
-    back False, since what is sent IS the selection.
-    """
-    tool = ALITool()
-    cleaned = tool.validate({
-        "input": ResolvedPath("/tmp/cohort", "folder"),
-        "model": "/data/ALI/models/ALI_CBCT_Models",
-        "landmarks": {name: True for name in ASO_LANDMARKS},
-        "prediction_ID": "Pred",
-    })
-
-    assert cleaned["input"].kind == "folder"
-    assert {name for name, on in cleaned["landmarks"].items() if on} == set(ASO_LANDMARKS)
-    assert set(cleaned["landmarks"]) == set(cbct_catalog.LABELS)
-    # The regions were never sent, so they arrive as their declared defaults --
-    # all on -- and the landmark selection is what must win. See
-    # engine.requested_landmarks.
-    assert set(cleaned["cbct_regions"].selected) == set(cbct_catalog.REGION_NAMES)
-
-
-def test_a_landmark_aso_asks_for_that_this_catalog_lacks_is_a_clear_422():
-    """Not a silent drop: ASO would then orient against fewer points than it
-    asked for and report success."""
-    tool = ALITool()
-    with pytest.raises(ToolArgumentError) as excinfo:
-        tool.validate({
-            "input": ResolvedPath("/tmp/cohort", "folder"),
-            "landmarks": {"NoSuchPoint": True},
-        })
-    assert "NoSuchPoint" in str(excinfo.value)
+    assert set(report["landmarks_requested"]) == set(ASO_LANDMARKS)
+    # The regions were left at their all-on default and did not widen it.
+    assert "C2" not in report["landmarks_requested"]
+    # And the report says the selection came from `landmarks`, not the regions.
+    assert report["regions"] == []
