@@ -24,6 +24,13 @@ _OUTPUTS = "Outputs"
 _CBCT_ONLY = {"modality": catalogs.MODALITY_CBCT}
 _IOS_ONLY = {"modality": catalogs.MODALITY_IOS}
 
+# The masks are the one argument a mode makes meaningless rather than merely
+# optional: in either automated mode AMASSS produces them, and a field offered
+# there reads as something the run needs. Conditions are ANDed, so this is
+# "CBCT, and only when you are supplying them yourself" -- the same sentence
+# the argument's own description opens with.
+_CBCT_SEMI = {"modality": catalogs.MODALITY_CBCT, "automation": catalogs.AUTOMATION_SEMI}
+
 LAYOUT = {
     "t1": {"section": _INPUTS, "label": "T1 (baseline)"},
     "t2": {"section": _INPUTS, "label": "T2 (follow-up)"},
@@ -39,7 +46,7 @@ LAYOUT = {
         "ui": "inline",
         "visible_when": _CBCT_ONLY,
     },
-    "t1_masks": {"section": _CBCT, "label": "T1 masks", "visible_when": _CBCT_ONLY},
+    "t1_masks": {"section": _CBCT, "label": "T1 masks", "visible_when": _CBCT_SEMI},
     "segmentation_model": {
         "section": _CBCT, "label": "Segmentation model", "visible_when": _CBCT_ONLY,
     },
