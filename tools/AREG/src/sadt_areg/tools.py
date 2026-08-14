@@ -114,7 +114,8 @@ def segment_masks(sup, scan_dir: str, model_path: str, mask_structures) -> str:
     ))
 
 
-def orient_scans(sup, scan_dir: str, reference_path: str, modality: str, **extra) -> str:
+def orient_scans(sup, scan_dir: str, reference_path: str, modality: str,
+                 landmark_model: str = "", **extra) -> str:
     """Orient every case under `scan_dir` onto `reference_path`.
 
     Fully-Automated on both modalities: for CBCT that is ASO predicting the
@@ -134,6 +135,12 @@ def orient_scans(sup, scan_dir: str, reference_path: str, modality: str, **extra
         "automation": "Fully-Automated",
         "output_suffix": "Or",
     }
+    # CBCT orientation is itself landmark-driven, and ASO needs the bundle
+    # NAMED: it used to be optional because the server picked one matching the
+    # input, and a tool no longer resolves paths. Forgetting it is a failure
+    # three tools down, so it is passed explicitly and required by _check_cbct.
+    if modality == "CBCT" and landmark_model:
+        parameters["landmark_model"] = landmark_model
     parameters.update(extra)
     return _returned(sup.run("ASO", **parameters))
 

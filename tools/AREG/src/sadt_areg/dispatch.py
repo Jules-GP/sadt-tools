@@ -79,6 +79,7 @@ def register(
     segmentation_model: str = None,
     segmentation_label: int = 0,
     orientation_reference: str = None,
+    landmark_model: str = None,
     registration_model: str = None,
     ios_patch: str = catalogs.PATCH_PALATE,
     mgl_landmarks_path: str = None,
@@ -124,6 +125,7 @@ def register(
             suffix=output_suffix,
             report=report,
             sup=sup,
+            landmark_model=landmark_model,
         )
     else:
         from .ios import mgl
@@ -171,6 +173,7 @@ def main(
     segmentation_label=0,
     segmentation_model=None,
     cbct_reference=None,
+    landmark_model=None,
     ios_reference=None,
     registration_model=None,
     ios_patch=None,
@@ -222,6 +225,7 @@ def main(
         segmentation_model=str(segmentation_model) if segmentation_model else None,
         segmentation_label=int(segmentation_label or 0),
         orientation_reference=str(reference) if reference else None,
+        landmark_model=landmark_model,
         registration_model=str(registration_model) if registration_model else None,
         ios_patch=patch,
         mgl_landmarks_path=str(mgl_landmarks) if mgl_landmarks else None,
@@ -333,7 +337,7 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
 def _run_cbct(
     t1_root, t2_root, t1_masks_path, automation, regions, segmentation_model,
     segmentation_label, orientation_reference, dicom_input, output_dir, work_dir,
-    suffix, report, sup=None,
+    suffix, report, sup=None, landmark_model=None,
 ) -> None:
     # Imported here rather than at module level: the CBCT engine pulls in
     # SimpleITK and itk-elastix, and AREG must load on a server without them so
@@ -357,7 +361,8 @@ def _run_cbct(
     if automation == catalogs.AUTOMATION_ORIENTED:
         oriented = tools.orient_scans(
             sup,
-            t1_root, orientation_reference, catalogs.MODALITY_CBCT
+            t1_root, orientation_reference, catalogs.MODALITY_CBCT,
+            landmark_model=landmark_model or "",
         )
         report["oriented_t1"] = True
         t1_root = oriented

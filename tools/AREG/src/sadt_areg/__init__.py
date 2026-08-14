@@ -42,6 +42,7 @@ def run(
     segmentation_model: Path = "",
     segmentation_label: int = 0,
     cbct_reference: Path = "",
+    landmark_model: Path = "",
     ios_reference: Path = "",
     ios_patch: Literal[
         "Palate (upper arch)", "Mucogingival line (lower arch)"
@@ -83,6 +84,10 @@ def run(
             binary mask needs.
         cbct_reference: CBCT only. The reference the scans are oriented onto
             before registering, when the mode orients them.
+        landmark_model: CBCT only, and only when the mode orients. The bundle
+            the orientation tool predicts its landmarks with — it names weights
+            it cannot resolve itself, so forgetting this fails three tools down
+            rather than here.
         ios_reference: IOS only, and the same idea.
         ios_patch: IOS only. Which part of the arch to match on — the palate for
             an upper arch, the band around the mucogingival line for a lower one.
@@ -118,6 +123,7 @@ def run(
         segmentation_label=segmentation_label,
         segmentation_model=str(segmentation_model) if segmentation_model else None,
         cbct_reference=str(cbct_reference) if cbct_reference else None,
+        landmark_model=str(landmark_model) if landmark_model else None,
         ios_reference=str(ios_reference) if ios_reference else None,
         registration_model=str(registration_model) if registration_model else None,
         ios_patch=ios_patch,
