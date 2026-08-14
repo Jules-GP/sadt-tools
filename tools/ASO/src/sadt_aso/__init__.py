@@ -21,7 +21,7 @@ def run(
     modality: Literal["CBCT", "IOS"] = "CBCT",
     automation: Literal["Semi-Automated", "Fully-Automated"] = "Semi-Automated",
     landmarks: Path = "",
-    landmark_models: Path = "",
+    landmark_model: Path = "",
     # Spelled out because `Literal` takes literals only -- it cannot be built
     # from catalogs.CBCT_LANDMARKS. That makes this a second declaration of the
     # same set, which is the thing this contract otherwise avoids, so a test
@@ -88,9 +88,14 @@ def run(
             CBCT work with no supervisor: run the landmark tool yourself and
             pass its output here. Paired to scans by name, like the ones in the
             input tree.
-        landmark_models: The model bundle the landmark tool predicts with.
+        landmark_model: The model bundle the landmark tool predicts with.
             Required by Fully-Automated CBCT when the landmarks are not
-            supplied, and ignored otherwise.
+            supplied, and ignored otherwise. Singular, and that matters: the
+            server publishes an argument named `model`, `*_model` or
+            `*_reference` as a name picked from the weights it hosts, and
+            anything else as a file a clinician may upload. `landmark_models`
+            missed that rule by one letter and would have asked for a 4.7 GB
+            bundle from a laptop.
         cbct_landmarks: CBCT only. Which landmarks to register on; at least 3,
             and they must exist in the reference. The default seven are the
             points both published reference bundles are built on.
@@ -131,7 +136,7 @@ def run(
         ios_jaws=ios_jaws,
         ios_occlusion=ios_occlusion,
         landmarks_path=str(landmarks) if landmarks else "",
-        landmark_models=str(landmark_models) if landmark_models else "",
+        landmark_model=str(landmark_model) if landmark_model else "",
         dicom_input=dicom_input,
         output_suffix=output_suffix,
         max_triplets=max_triplets,

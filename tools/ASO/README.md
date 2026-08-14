@@ -108,9 +108,11 @@ predictions = sup.run("ALI", input=centered_root, model=..., output_dir=..., lan
   straddle two of ALI's regions, so asking by region would run 58 agents to use
   seven — and one agent is a full two-scale walk of the volume.
 
-**The server does not implement supervisors yet.** Until it does, fully-automated
-CBCT is not servable, and this package's other three modes are. That is the
-expected state: the server keeps serving its own copy meanwhile. See
+**The server does not implement supervisors yet** — re-checked 2026-08-14 against
+`newArch`: one occurrence of the word in the whole repository, and it is a line
+of documentation. Until that changes, fully-automated CBCT is not servable and
+this package's other three modes are, including fully-automated **with
+`landmarks` supplied**, which needs no supervisor at all. See
 [docs/SERVER_CONTRACT.md](../../docs/SERVER_CONTRACT.md).
 
 ### From a checkout, with a supervisor
@@ -150,7 +152,7 @@ that already has the points does not spend a GPU re-predicting them.
 |---|---|
 | Inputs | `input`: one scan (`.nii`/`.nii.gz`/`.nrrd`/`.nrrd.gz`/`.gipl`/`.gipl.gz`), one mesh (`.vtk`/`.stl`), or a folder of either. `reference`: the already-oriented case defining the target frame. `output_dir`: where results go. |
 | Outputs | Per patient: the oriented scan or mesh, its landmarks (`_lm_Or.mrk.json`) and the transform (`_Or_transform.tfm`), mirroring the input tree, plus `ASO_report.json`. |
-| Model files | None for three of the four modes — a *reference bundle* is data, not weights. Fully-automated CBCT needs ALI's bundle, named in `landmark_models` and passed straight through. |
+| Model files | None for three of the four modes — a *reference bundle* is data, not weights. Fully-automated CBCT needs ALI's bundle, named in `landmark_model` and passed straight through. Both `reference` and `landmark_model` are named so the server publishes them as hosted names rather than uploads. |
 | GPU | None. This is the one migrated tool with no torch in it; the venv is 1.2 GB. |
 
 Three behaviours worth knowing before reading a result:

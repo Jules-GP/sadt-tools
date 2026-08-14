@@ -87,6 +87,15 @@ Validate the value in the tool and raise on a bad one.
 comes from, so there is no second declaration to contradict the signature.
 `n: int = None` is refused: it makes a required argument look optional.
 
+**Name a hosted path `*_model` or `*_reference`.** Whatever serves the tool
+decides from the argument's NAME whether a `Path` is something it already holds
+or something the caller uploads: `model`, `*_model` and `*_reference` are picked
+from `DATA/<tool>/models/`, everything else gets a file picker. That is a safety
+property — a clinician must not be able to send model weights from a laptop —
+and it is one letter wide: `ASO`'s `landmark_models`, plural, missed it and
+would have asked for a 4.7 GB bundle as an upload. Check every `Path` argument
+against that rule before opening the PR.
+
 **Path arguments take a folder.** The server pays a process start-up cost per
 call, so a folder of 40 scans has to be one call, not 40. Upstream is
 inconsistent about this; standardise on batch-capable inputs. `iter_scans` in
