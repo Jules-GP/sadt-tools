@@ -101,6 +101,37 @@ call, so a folder of 40 scans has to be one call, not 40. Upstream is
 inconsistent about this; standardise on batch-capable inputs. `iter_scans` in
 the template is the shape to copy.
 
+**A panel is presentation, and it lives in `layout.py`.** The signature says
+what a tool accepts; it says nothing about how a clinician should be shown it,
+and a schema that publishes "119 strings, pick some" is honest and unusable.
+An optional `layout.py` beside the package fixes that:
+
+```python
+from .cbct import catalog
+
+LAYOUT = {
+    "landmarks": {
+        "section": "CBCT landmarks",
+        "ui": "tabs",
+        "groups": {display: list(catalog.GROUP_LABELS[code])
+                   for display, code in catalog.REGION_NAMES.items()},
+    },
+    "ios_teeth": {"visible_when": {"modality": "IOS"}},
+}
+```
+
+Six keys, nothing else: `section`, `ui`, `groups`, `visible_when`, `label`,
+`hidden`. `describe.py` merges them into the published arguments and **refuses**
+any that names an argument the signature does not take, an option it does not
+offer, or a value a condition could never match. Absent is fine — the schema is
+then exactly what it was before.
+
+**Derive it, never restate it.** This replaces the `ArgSpec` tables, and those
+drifted precisely because they listed options by hand: a landmark added to the
+catalog was published by the schema and reachable through no tab at all.
+Computing the groups from the catalog makes that impossible, and the validation
+above is the backstop for whatever cannot be computed.
+
 **Never unpack a `.zip`.** The server unpacks archives before `run()` is
 called, so a tool always receives a real file or directory. The upstream tools
 each carried their own extraction, zip-bomb cap and scratch directory for it;

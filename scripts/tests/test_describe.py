@@ -426,3 +426,114 @@ def test_a_near_miss_supervisor_fails_loudly(tmp_path, body, expected):
     assert result.returncode == 2
     assert expected in result.stderr
     assert result.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# The optional panel layout
+# ---------------------------------------------------------------------------
+
+LAYOUT_TOOL = """
+    from typing import Literal
+
+    def run(scans: Path, output_dir: Path,
+            mode: Literal["CBCT", "IOS"] = "CBCT",
+            parts: list[Literal["a", "b", "c"]] = ["a"]) -> Path:
+        \"\"\"Do a thing.\"\"\"
+        return output_dir
+"""
+
+
+def make_layout(root, body, package="sadt_fixture"):
+    (root / "src" / package / "layout.py").write_text(
+        textwrap.dedent(body), encoding="utf-8"
+    )
+    return root
+
+
+def test_a_tool_without_a_layout_is_unchanged(tmp_path):
+    """Absent is the ordinary case, and must publish exactly what it did before
+    layouts existed."""
+    schema = json.loads(describe(make_tool(tmp_path, LAYOUT_TOOL)).stdout)
+
+    for spec in schema["arguments"].values():
+        assert "section" not in spec and "ui" not in spec
+
+
+def test_layout_hints_are_merged_into_the_arguments(tmp_path):
+    """Into the argument, not beside it: a client reads one spec per argument,
+    and a second place to look is a second place to forget."""
+    root = make_tool(tmp_path, LAYOUT_TOOL)
+    make_layout(root, '''
+        LAYOUT = {
+            "scans": {"section": "Inputs", "label": "Scans"},
+            "parts": {"ui": "tabs", "groups": {"First": ["a"], "Rest": ["b", "c"]}},
+            "mode": {"section": "Inputs"},
+        }
+    ''')
+
+    schema = json.loads(describe(root).stdout)
+
+    assert schema["arguments"]["scans"]["section"] == "Inputs"
+    assert schema["arguments"]["scans"]["label"] == "Scans"
+    assert schema["arguments"]["parts"]["groups"] == {"First": ["a"], "Rest": ["b", "c"]}
+    # And it changed nothing about what the tool accepts.
+    assert schema["arguments"]["parts"]["choices"] == ["a", "b", "c"]
+
+
+def test_a_layout_naming_an_argument_that_does_not_exist_fails(tmp_path):
+    root = make_tool(tmp_path, LAYOUT_TOOL)
+    make_layout(root, 'LAYOUT = {"nope": {"section": "Inputs"}}')
+
+    result = describe(root)
+
+    assert result.returncode == 2
+    assert "no argument 'nope'" in result.stderr
+
+
+def test_a_tab_listing_an_option_that_is_not_offered_fails(tmp_path):
+    """THE check that replaces the drift. The `ArgSpec` tables this succeeds
+    listed options by hand, and a landmark added to the catalog was reachable
+    through no tab at all -- published by the schema, invisible in the UI."""
+    root = make_tool(tmp_path, LAYOUT_TOOL)
+    make_layout(root, 'LAYOUT = {"parts": {"groups": {"Tab": ["a", "zzz"]}}}')
+
+    result = describe(root)
+
+    assert result.returncode == 2
+    assert "does not offer" in result.stderr and "zzz" in result.stderr
+
+
+def test_a_condition_on_a_value_the_argument_never_takes_fails(tmp_path):
+    """A panel whose field never appears is worse than one that always does."""
+    root = make_tool(tmp_path, LAYOUT_TOOL)
+    make_layout(root, 'LAYOUT = {"parts": {"visible_when": {"mode": "MRI"}}}')
+
+    result = describe(root)
+
+    assert result.returncode == 2
+    assert "which it never is" in result.stderr
+
+
+def test_a_condition_on_an_argument_that_does_not_exist_fails(tmp_path):
+    root = make_tool(tmp_path, LAYOUT_TOOL)
+    make_layout(root, 'LAYOUT = {"parts": {"visible_when": {"nope": "CBCT"}}}')
+
+    assert "does not take" in describe(root).stderr
+
+
+def test_an_unknown_layout_key_fails(tmp_path):
+    """A hint the client would silently drop is a hint that reads as working."""
+    root = make_tool(tmp_path, LAYOUT_TOOL)
+    make_layout(root, 'LAYOUT = {"scans": {"colour": "red"}}')
+
+    result = describe(root)
+
+    assert result.returncode == 2
+    assert "unknown key" in result.stderr and "colour" in result.stderr
+
+
+def test_groups_on_an_argument_with_no_choices_fails(tmp_path):
+    root = make_tool(tmp_path, LAYOUT_TOOL)
+    make_layout(root, 'LAYOUT = {"scans": {"groups": {"Tab": ["a"]}}}')
+
+    assert "has none" in describe(root).stderr

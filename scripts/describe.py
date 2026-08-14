@@ -21,6 +21,7 @@ this must run inside it -- so no tomllib and no match statement here.
 
 import argparse
 import hashlib
+import importlib
 import inspect
 import json
 import sys
@@ -66,6 +67,21 @@ LITERAL_TYPES = (str, int)
 # importing a supervisor class would need a package shared with the server,
 # which is the coupling this repository exists to remove.
 SUPERVISOR = "sup"
+
+# Presentation, and ONLY presentation. A tool may ship a `layout` module beside
+# its package declaring how a client should lay its panel out; these are the
+# keys it may set, and nothing here can change what `run()` accepts.
+#
+# It exists because a schema that says only "119 strings, pick some" makes a
+# panel nobody can use, and the client already knows how to render tabs,
+# sections and conditional fields -- it just stopped being told. The old
+# `ArgSpec` tables carried this and DRIFTED from the code, so the rule is that
+# a layout module may only ever DERIVE from the tool's own catalogs, never
+# restate them; `layout_for` below refuses anything that names an argument or
+# an option the signature does not publish, which is what makes that hold.
+LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "label", "hidden")
+
+LAYOUT_MODULE = "layout"
 
 
 class SchemaError(Exception):
@@ -247,7 +263,98 @@ def is_supervisor(name, parameter, hints):
     return True
 
 
-def describe_run(run):
+def layout_for(package, arguments):
+    """The tool's optional panel layout, checked against what it publishes.
+
+    Absent is the ordinary case and means no hints: the schema is exactly what
+    it was before this existed. Present, every key is verified -- an argument
+    that does not exist, an option that is not offered, or a key outside
+    LAYOUT_KEYS is a hard error rather than a hint the client silently drops.
+    """
+    try:
+        module = importlib.import_module("{}.{}".format(package, LAYOUT_MODULE))
+    except ImportError:
+        return {}
+
+    declared = getattr(module, "LAYOUT", None)
+    if declared is None:
+        raise SchemaError("{}.{} defines no LAYOUT.".format(package, LAYOUT_MODULE))
+    if not isinstance(declared, dict):
+        raise SchemaError("{}.{}.LAYOUT must be a dict.".format(package, LAYOUT_MODULE))
+
+    for name, hints in declared.items():
+        where = "layout for '{}'".format(name)
+        if name not in arguments:
+            raise SchemaError(
+                "{}: run() has no argument '{}'. A layout may only describe "
+                "arguments that exist.".format(where, name)
+            )
+        if not isinstance(hints, dict):
+            raise SchemaError("{}: must be a dict of hints.".format(where))
+        unknown = sorted(set(hints) - set(LAYOUT_KEYS))
+        if unknown:
+            raise SchemaError(
+                "{}: unknown key(s) {}. A layout sets only {}.".format(
+                    where, ", ".join(unknown), ", ".join(LAYOUT_KEYS)
+                )
+            )
+        _check_groups(where, hints, arguments[name])
+        _check_visible_when(where, hints, arguments)
+    return declared
+
+
+def _check_groups(where, hints, argument):
+    """Every option a group mentions must be one the argument offers.
+
+    This is the check that replaces the drift: the old tables listed options by
+    hand and a landmark added to the catalog was unreachable through any tab.
+    """
+    groups = hints.get("groups")
+    if groups is None:
+        return
+    if not isinstance(groups, dict):
+        raise SchemaError("{}: 'groups' must be a dict of tab -> options.".format(where))
+    offered = set(argument.get("choices") or ())
+    if not offered:
+        raise SchemaError(
+            "{}: 'groups' needs an argument with choices; this one has none.".format(where)
+        )
+    for tab, options in groups.items():
+        missing = [option for option in options if option not in offered]
+        if missing:
+            raise SchemaError(
+                "{}: tab '{}' lists option(s) the argument does not offer: "
+                "{}.".format(where, tab, ", ".join(str(m) for m in missing))
+            )
+
+
+def _check_visible_when(where, hints, arguments):
+    """A condition must name a real argument, and a value it can actually take."""
+    conditions = hints.get("visible_when")
+    if conditions is None:
+        return
+    if not isinstance(conditions, dict):
+        raise SchemaError("{}: 'visible_when' must be a dict of argument -> value.".format(where))
+    for other, expected in conditions.items():
+        if other not in arguments:
+            raise SchemaError(
+                "{}: 'visible_when' names '{}', which run() does not take.".format(where, other)
+            )
+        offered = arguments[other].get("choices")
+        if not offered:
+            continue
+        wanted = expected if isinstance(expected, (list, tuple)) else [expected]
+        missing = [value for value in wanted if value not in offered]
+        if missing:
+            raise SchemaError(
+                "{}: 'visible_when' expects '{}' to be {}, which it never is. It "
+                "offers: {}.".format(
+                    where, other, ", ".join(str(m) for m in missing), ", ".join(offered)
+                )
+            )
+
+
+def describe_run(run, package=None):
     """Turn run()'s signature and docstring into the published schema."""
     doc = inspect.getdoc(run)
     if not doc or not doc.strip():
@@ -303,6 +410,12 @@ def describe_run(run):
         "arguments": arguments,
         "returns": return_name(hints.get("return", signature.return_annotation)),
     }
+    # Presentation last, and merged INTO the arguments rather than sitting
+    # beside them: a client reads one spec per argument, and a second place to
+    # look is a second place to forget.
+    for name, hints in layout_for(package, arguments).items() if package else []:
+        arguments[name].update(hints)
+
     if supervisor:
         # Published so the server can tell, before accepting a job, that this
         # tool needs something to be injected. A deployment whose runner cannot
@@ -389,7 +502,7 @@ def main(argv=None):
     try:
         module_name = args.module or find_package(src_dir)
         schema = {"name": tool_dir.name}
-        schema.update(describe_run(load_run(src_dir, module_name)))
+        schema.update(describe_run(load_run(src_dir, module_name), module_name))
         schema["source_hash"] = source_hash(src_dir)
     except SchemaError as error:
         sys.stderr.write("{}: {}\n".format(tool_dir.name, error))

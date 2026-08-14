@@ -197,7 +197,7 @@ def test_ios_offers_only_landmark_types_a_model_predicts():
     nothing: no network produced them and no label table contained them.
     Ticking them did literally nothing."""
     offered = {lm_type for types in ios_catalog.NETWORKS.values() for lm_type in types}
-    assert offered == {"O", "MB", "DB", "CL", "CB"}
+    assert offered == {"O", "MB", "DB", "CL", "CB", "MG"}
     assert not offered & {"R", "RIP", "OIP"}
 
 
@@ -853,6 +853,7 @@ def test_an_empty_ios_selection_on_ios_input_names_the_argument(tmp_path):
             input=tmp_path / "cohort",
             model=tmp_path,
             output_dir=tmp_path / "out",
+            modality="IOS",
             ios_networks=[],
         )
     message = str(raised.value)
@@ -1070,3 +1071,121 @@ def test_the_real_ios_bundle_places_landmarks_on_a_real_mesh(tmp_path):
     assert report["mode"] == "IOS"
     assert report["summary"]["processed"] == 1
     assert sorted(output.rglob("*.mrk.json"))
+
+
+# ---------------------------------------------------------------------------
+# Mucogingival
+# ---------------------------------------------------------------------------
+
+def test_mucogingival_is_offered_but_not_on_by_default():
+    """One point per lower tooth on the gingival margin, wanted by a mandible
+    registration and by nobody asking for crown landmarks. On by default would
+    add a third pass over every mesh of every existing request."""
+    import inspect
+
+    assert ios_catalog.NETWORK_NAMES["Mucogingival"] == "MG"
+    assert "Mucogingival" in _choices("ios_networks")
+    assert inspect.signature(run).parameters["ios_networks"].default == [
+        "Occlusal", "Cervical"
+    ]
+
+
+def test_mucogingival_runs_on_the_mandible_only():
+    """It was trained on the mandible alone, so a maxilla is not a missing
+    model -- it is a question the network cannot be asked."""
+    assert ios_catalog.NETWORK_JAWS["MG"] == ("Lower",)
+    # The other two are unrestricted, and must stay that way.
+    assert "O" not in ios_catalog.NETWORK_JAWS
+    assert "C" not in ios_catalog.NETWORK_JAWS
+
+
+def test_the_mucogingival_names_are_positional_not_derived():
+    """Six MG output names collide with the TRAINING name of a DIFFERENT tooth
+    -- LR1MG is the training name of tooth 25 and the output name of tooth 26 --
+    because tooth 25 carries the midline name L0MG and shifts the right side by
+    one. Deriving `<tooth><type>` here would mislabel half the arch."""
+    labels = ios_catalog.LABELS["MG"]
+
+    assert labels["19"] == ["LL6MG"]      # first trained tooth
+    assert labels["25"] == ["L0MG"]       # the midline, not "LR1MG"
+    assert labels["26"] == ["LR1MG"]      # shifted by one against the numbers
+    assert labels["31"] == ["LR6MG"]
+    # Tooth 18 was excluded from training and has no MG label at all.
+    assert "18" not in labels
+    assert len(labels) == 13 == len(ios_catalog.MG_TEETH)
+
+
+def test_every_mucogingival_tooth_has_an_aim_offset():
+    """The cameras aim at the landmark's expected position rather than at a
+    flat drop below the tooth centre, which only ever matched the incisors: on
+    the molars the landmark is ~0.15 further buccal and fell outside the render
+    entirely. A tooth with no offset would be back to that."""
+    assert set(ios_catalog.MG_AIM_OFFSET) == set(ios_catalog.MG_TEETH)
+    for tooth, offset in ios_catalog.MG_AIM_OFFSET.items():
+        assert len(offset) == 3, tooth
+        # Below the crown, always: the gingival margin is under it.
+        assert offset[2] < 0, tooth
+
+
+def test_a_degraded_landmark_carries_its_caveat_into_the_file(tmp_path):
+    """A point placed from an arch fit looks exactly like a good one in the
+    file. Whoever opens it is the one who has to know which to review, so the
+    caveat travels WITH the point rather than only in the run report."""
+    path = markups.write(
+        {"LL6MG": (1.0, 2.0, 3.0), "LL5MG": (4.0, 5.0, 6.0)},
+        str(tmp_path / "arch_lm_Pred.mrk.json"),
+        descriptions={"LL6MG": "position estimated from the arch"},
+    )
+    points = {
+        point["label"]: point["description"]
+        for point in json.loads(open(path, encoding="utf-8").read())["markups"][0][
+            "controlPoints"
+        ]
+    }
+
+    assert points["LL6MG"] == "position estimated from the arch"
+    # And a point with nothing to say still says nothing.
+    assert points["LL5MG"] == ""
+
+
+def test_a_declared_modality_the_data_contradicts_is_refused(tmp_path):
+    """The mode is still read from the DATA. `modality` exists so a client can
+    show one half of the panel at a time, and it is CHECKED rather than
+    believed: declaring CBCT over a folder of meshes would otherwise run the
+    wrong engine and call it a success."""
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    with pytest.raises(ToolInputError) as raised:
+        run(
+            input=tmp_path / "cohort",
+            model=tmp_path,
+            output_dir=tmp_path / "out",
+            modality="CBCT",
+        )
+    message = str(raised.value)
+    assert "IOS" in message and "CBCT" in message
+
+
+def test_a_declared_modality_that_agrees_runs(tmp_path, stub_agent, cbct_environment):
+    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
+    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
+
+    output_dir = run(
+        input=tmp_path / "cohort", model=bundle, output_dir=tmp_path / "out",
+        modality="CBCT", cbct_regions=CRANIAL_BASE_ONLY,
+    )
+    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
+    assert report["mode"] == "CBCT"
+
+
+def test_the_two_halves_of_the_panel_are_mutually_exclusive():
+    """The visual complaint this argument exists to fix: both engines'
+    selections were shown at once, so a CBCT user had to know which half to
+    ignore."""
+    from sadt_ali import layout
+
+    assert layout.LAYOUT["cbct_regions"]["visible_when"] == {"modality": "CBCT"}
+    assert layout.LAYOUT["landmarks"]["visible_when"] == {"modality": "CBCT"}
+    assert layout.LAYOUT["ios_networks"]["visible_when"] == {"modality": "IOS"}
+    # And the selector itself is always shown, at the top.
+    assert "visible_when" not in layout.LAYOUT["modality"]
