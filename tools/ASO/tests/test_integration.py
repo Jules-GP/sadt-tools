@@ -218,7 +218,7 @@ def test_fully_automated_without_landmarks_is_refused_by_this_runner(case, tmp_p
             output_dir=tmp_path / "out",
             modality="CBCT",
             automation="Fully-Automated",
-            landmark_models="ALI_CBCT_Models",
+            landmark_model="ALI_CBCT_Models",
         )
 
     message = str(raised.value)
@@ -320,7 +320,7 @@ def test_fully_automated_cbct_drives_ali_through_the_supervisor(tmp_path):
         modality="CBCT",
         automation="Fully-Automated",
         cbct_landmarks=points,
-        landmark_models=bundle,
+        landmark_model=bundle,
     )
 
     report = json.loads((output_dir / "ASO_report.json").read_text())

@@ -12,6 +12,7 @@ back.
 
 import json
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -229,7 +230,7 @@ def test_mode_specific_arguments_are_optional():
 
     parameters = inspect.signature(run).parameters
     optional = (
-        "modality", "automation", "landmarks", "landmark_models", "cbct_landmarks",
+        "modality", "automation", "landmarks", "landmark_model", "cbct_landmarks",
         "ios_teeth", "ios_landmark_types", "ios_jaws", "ios_occlusion", "dicom_input",
         "output_suffix",
     )
@@ -757,7 +758,7 @@ def test_fully_automated_cbct_says_so_when_there_is_no_supervisor(tmp_path):
         _run_aso(
             tmp_path, input=str(tmp_path), reference=str(tmp_path),
             modality="CBCT", automation="Fully-Automated",
-            landmark_models="CBCT_landmark_models_ALI",
+            landmark_model="CBCT_landmark_model_ALI",
         )
     message = str(raised.value)
     assert dispatch.LANDMARK_TOOL in message
@@ -780,7 +781,7 @@ def test_fully_automated_cbct_needs_a_model_bundle(tmp_path):
     input from its own hosted models. A tool no longer resolves paths, so the
     bundle has to be named -- and saying which argument is the difference
     between a fixable request and a failure inside another tool."""
-    with pytest.raises(ToolInputError, match="landmark_models"):
+    with pytest.raises(ToolInputError, match="landmark_model"):
         _run_aso(
             tmp_path, input=str(tmp_path), reference=str(tmp_path),
             modality="CBCT", automation="Fully-Automated",
@@ -798,7 +799,7 @@ def test_fully_automated_cbct_runs_through_the_supervisor(tmp_path):
     output_dir = _run_aso(
         tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
         modality="CBCT", automation="Fully-Automated",
-        landmark_models="CBCT_landmark_models_ALI",
+        landmark_model="CBCT_landmark_model_ALI",
         cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
     )
     report = _report(output_dir)
@@ -817,7 +818,7 @@ def test_the_landmark_tool_is_asked_by_name_for_the_points_aso_needs(tmp_path):
     _run_aso(
         tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
         modality="CBCT", automation="Fully-Automated",
-        landmark_models="/data/ALI/models/Bundle",
+        landmark_model="/data/ALI/models/Bundle",
         cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
     )
 
@@ -846,7 +847,7 @@ def test_the_landmark_tool_is_run_on_the_recentred_scans(tmp_path):
     _run_aso(
         tmp_path, input=str(root), reference=_cbct_reference(tmp_path),
         modality="CBCT", automation="Fully-Automated",
-        landmark_models="Bundle", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
+        landmark_model="Bundle", cbct_landmarks=list(_REFERENCE_POINTS), sup=sup,
     )
 
     _tool, params = sup.calls[0]
@@ -1387,3 +1388,38 @@ def test_a_tools_own_run_report_is_not_read_as_landmarks(tmp_path):
 
     assert set(collected) == {"patient1"}
     assert set(collected["patient1"]) == set(_REFERENCE_POINTS)
+
+
+def test_arguments_naming_hosted_weights_end_in_model_or_reference():
+    """Weights and reference bundles must be NAMED, never uploaded.
+
+    Whatever serves this tool decides which `Path` arguments it hosts from the
+    argument's NAME: `model`, `*_model` and `*_reference` are picked from the
+    data it already holds, and every other path is something the caller may
+    send. That is a safety property, not a convenience -- a clinician must not
+    be asked to upload model weights from a laptop.
+
+    `landmark_model` was `landmark_models` and missed the rule by one letter,
+    which would have put a file picker in front of a 4.7 GB bundle. Hence this
+    test rather than a comment.
+    """
+    import inspect
+    import typing
+
+    hints = typing.get_type_hints(run)
+    hosted = {"reference", "landmark_model"}
+    paths = {
+        name for name, parameter in inspect.signature(run).parameters.items()
+        if hints.get(name) is Path and name != "output_dir"
+    }
+
+    def is_hosted(name):
+        return name == "model" or name.endswith(("_model", "_reference")) or name == "reference"
+
+    assert hosted <= paths, "an argument this test names has disappeared: {}".format(
+        hosted - paths
+    )
+    for name in hosted:
+        assert is_hosted(name), name
+    # And nothing else claims to be hosted by accident.
+    assert {name for name in paths if is_hosted(name)} == hosted

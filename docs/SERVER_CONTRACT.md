@@ -5,62 +5,61 @@ Written for whoever works on
 It is the other half of the split: this repository holds tools that know nothing
 about the server, so everything they stopped doing, the server now does.
 
-## Status: checked against the server, 2026-08-12
+## Status: re-checked against the server, 2026-08-14
 
-Everything below was verified by **running it**, against
-`slicer-remote-tool-server` at `5c22e46` ("FIX : align the server with the
-contract sadt-tools actually emits"). The server has been aligned in parallel
-and already implements the contract. What was confirmed working:
+Checked against `slicer-remote-tool-server` on branch **`newArch`** at
+`fe40645`, **with uncommitted work in the tree** — `dispatch.py`/`runner.py`
+moved under `server/execution/`, `registry.py` and friends under
+`server/registry/`. Read-only inspection, so the findings below are about a
+moving target; re-check before relying on them.
 
-| | Evidence |
+Two things changed since 2026-08-12, both in the server's favour:
+
+- **`server/deployment.toml` exists now**, and mostly does not need to. The
+  commit *"a tool needs no server-side configuration at all"* added
+  `server/registry/conventions.py`, which derives from argument **names** what
+  that file used to have to state. `deployment.toml` survives as a
+  per-argument override for exceptions. The gap this document previously
+  reported as blocking is closed.
+- **Model arguments are recognised by name.** `model`, `*_model` and
+  `*_reference` are published as a name picked from `DATA/<tool>/models/`;
+  every other `path` may be uploaded. That is a safety property — a clinician
+  must never be able to send weights from a laptop — and it is now the rule
+  every tool here has to be named against. See "Naming" below.
+
+**Still missing: the server injects no supervisor.** One occurrence of the word
+in the whole repository, and it is documentation:
+
+```
+$ grep -rn "supervisor" --include='*.py' --include='*.md' .
+ADDING_A_TOOL.md:39:| `*, sup` | — | the supervisor, never published |
+```
+
+`server/execution/runner.py` calls `run(**_call_arguments(run, job["params"]))`,
+and `_call_arguments` only coerces what the job file carries. So `ASO`'s
+fully-automated CBCT mode raises `SupervisorRequired` under this runner —
+which is what `test_fully_automated_without_landmarks_is_refused_by_this_runner`
+pins, and what will start failing the day this changes.
+
+**The `supervisor` key is ignored, not refused.** `schema_tool._TOP_LEVEL_KEYS`
+does not list it, and an unknown key is logged as a warning, so a tool that
+declares one still loads — it just loads as though it had not. Adding
+`"supervisor"` to that tuple is the one-line change that lets the server refuse
+the tool up front instead.
+
+## Naming, because the server reads it
+
+A tool that hosts nothing gets this for free, but two names are load-bearing:
+
+| Argument named | Published as |
 |---|---|
-| The runner runs a packaged tool in its own venv | `server/runner.py` ran `_template` and `surgmovpred` (real 112-model bundle) from `tools/`, writing `result.json` |
-| `dict[str, Path]` survives | surgmovpred came back as `{"excel": …, "csv": …}` |
-| Errors map by class name | a bad `metrics` gave `{"error": {"type": "ToolInputError", "message": "Unknown metric(s): median…"}}` |
-| The runner owns logging | surgmovpred's records appeared, formatted by the runner |
-| Schemas come from `describe.py` | `server/schema_tool.py:158` invokes it with the tool's interpreter |
-| `choices` is understood | `schema_tool.py:319` maps it back onto choice / multichoice widgets |
-| `source_hash` is the cache key | `schema_tool.py:190`, cached outside the read-only tool folder |
-| `output_dir` is stripped from what clients see | `amasss` publishes 11 of its 12 arguments |
-| Archives are unpacked, with the bomb cap and `strip_single_root` | `server/main.py:214` |
-| GPU work is capped **across** tools | `server/config.py:76` |
-| The registry loads them | 4 of 5 (`_template` correctly excluded), alongside the old in-process ones |
+| `model`, `*_model`, `*_reference` | a name picked from `DATA/<tool>/models/` |
+| any other `path` | a file the caller may upload |
 
-**One thing is missing: `server/deployment.toml` does not exist.** The mechanism
-that needs it is built — `ToolDeployment.data_dir` in `server/deployment.py`
-exists precisely for the case below — but with no file, `data_slug()` falls back
-to the tool's own name and `server_selectable` is empty for every tool. Measured
-consequence:
-
-```
-list_models("amasss")  -> []                    # the tool's name
-list_models("AMASSS")  -> ['AMASSS_Models']     # where the data actually is
-```
-
-So a migrated tool finds no weights, and its `model` argument is published as a
-plain path with no server-side listing — the client can neither pick a bundle
-nor upload one, since weights do not travel. Sixteen lines fix it, verified:
-
-```toml
-[tools.amasss]
-data_dir = "AMASSS"
-server_selectable = { model = "model", scans = "testfile" }
-
-[tools.batchdentalseg]
-data_dir = "BatchDentalSeg"
-server_selectable = { model = "model", scans = "testfile" }
-
-[tools.crownseg]
-data_dir = "CrownSeg"
-server_selectable = { model = "model", meshes = "testfile" }
-
-[tools.surgmovpred]
-data_dir = "SurgMovPred"
-server_selectable = { model = "model", measurements = "testfile" }
-```
-
-With it, all four resolve: `AMASSS_Models`, `PediatricDentalSeg`, `all_models`,
-`07-21-22_val-loss0.169.pth`.
+`ASO` shipped `landmark_models` — plural — which misses `*_model` by one letter
+and would have put a file picker in front of a 4.7 GB weight bundle. It is
+`landmark_model` now, with a test guarding it. Check a new tool's path
+arguments against this table before opening the PR; nothing else will.
 
 The rest of this document is the contract itself, kept as the reference the two
 repositories are written against.

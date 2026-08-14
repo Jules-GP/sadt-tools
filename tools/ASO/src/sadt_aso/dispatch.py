@@ -107,7 +107,7 @@ def orient(
     ios_jaws=None,
     ios_occlusion: str = catalogs.OCCLUSION_INDEPENDENT,
     landmarks_path: str = "",
-    landmark_models: str = "",
+    landmark_model: str = "",
     dicom_input: bool = False,
     output_suffix: str = "Or",
     max_triplets: int = 2500,
@@ -127,7 +127,7 @@ def orient(
 
     if modality == catalogs.MODALITY_CBCT:
         requested = _selected(cbct_landmarks, catalogs.CBCT_LANDMARK_CHOICES, "cbct_landmarks")
-        _check_cbct(automation, requested, landmarks_path, landmark_models, sup)
+        _check_cbct(automation, requested, landmarks_path, landmark_model, sup)
         selection = {"cbct_landmarks": requested}
     elif modality == catalogs.MODALITY_IOS:
         teeth = _selected(ios_teeth, catalogs.TOOTH_CHOICES, "ios_teeth")
@@ -167,7 +167,7 @@ def orient(
                 automation=automation,
                 requested=selection["cbct_landmarks"],
                 landmarks_path=landmarks_path,
-                landmark_models=landmark_models,
+                landmark_model=landmark_model,
                 dicom_input=dicom_input,
                 output_dir=output_dir,
                 work_dir=work_dir,
@@ -231,7 +231,7 @@ def _selected(value, choices: dict, argument: str) -> list:
 
 
 def _check_cbct(
-    automation: str, landmarks: list, landmarks_path: str, landmark_models: str, sup
+    automation: str, landmarks: list, landmarks_path: str, landmark_model: str, sup
 ) -> None:
     if len(landmarks) < 3:
         raise ToolInputError(
@@ -244,7 +244,7 @@ def _check_cbct(
     # Checked before the input is even read. Neither order changes what fails,
     # but this one changes what the caller is told: with no way to reach the
     # landmark tool, "send landmarks or use Semi-Automated" is the answer
-    # whatever they put in 'landmark_models'.
+    # whatever they put in 'landmark_model'.
     if sup is None:
         raise SupervisorRequired(
             f"Fully-Automated CBCT predicts the landmarks with the '{LANDMARK_TOOL}' tool, "
@@ -252,9 +252,9 @@ def _check_cbct(
             f"yourself in 'landmarks' (a folder of .mrk.json files, which is what "
             f"'{LANDMARK_TOOL}' produces), or use Semi-Automated mode."
         )
-    if not landmark_models:
+    if not landmark_model:
         raise ToolInputError(
-            f"Fully-Automated CBCT needs 'landmark_models': the model bundle "
+            f"Fully-Automated CBCT needs 'landmark_model': the model bundle "
             f"'{LANDMARK_TOOL}' predicts with. It used to be optional because the server "
             f"picked a bundle matching the input; a tool no longer resolves paths, so the "
             f"bundle has to be named."
@@ -373,7 +373,7 @@ def _check_ios(automation: str, teeth: list, types: list, jaws: list, occlusion:
 # ---------------------------------------------------------------------------
 
 def _predict_landmarks(
-    centered_root: str, landmark_models: str, requested: list, work_dir: str, sup
+    centered_root: str, landmark_model: str, requested: list, work_dir: str, sup
 ) -> dict:
     """Predict landmarks for every centred scan, through the supervisor.
 
@@ -392,7 +392,7 @@ def _predict_landmarks(
     produced = sup.run(
         LANDMARK_TOOL,
         input=centered_root,
-        model=landmark_models,
+        model=landmark_model,
         output_dir=output_dir,
         landmarks=list(requested),
         prediction_ID="Pred",
@@ -445,7 +445,7 @@ def _collect(output_dir: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _run_cbct(
-    input_root, reference_root, automation, requested, landmarks_path, landmark_models,
+    input_root, reference_root, automation, requested, landmarks_path, landmark_model,
     dicom_input, output_dir, work_dir, suffix, max_triplets, seed, report, sup,
 ) -> None:
     if dicom_input:
@@ -532,7 +532,7 @@ def _run_cbct(
     # scans).
     if fully:
         predictions = _predict_landmarks(
-            centered_root, landmark_models, requested, work_dir, sup
+            centered_root, landmark_model, requested, work_dir, sup
         )
         for key, entry in prepared.items():
             entry["landmarks"] = predictions.get(key, {})
