@@ -24,6 +24,7 @@ import hashlib
 import importlib
 import inspect
 import json
+import re
 import sys
 import typing
 from pathlib import Path
@@ -67,6 +68,17 @@ LITERAL_TYPES = (str, int)
 # importing a supervisor class would need a package shared with the server,
 # which is the coupling this repository exists to remove.
 SUPERVISOR = "sup"
+
+# The docstring section that explains the arguments, in the Google style the
+# whole repository already writes. It is the ONLY place that text lives: the
+# client shows it under the field, and a panel without it is a column of
+# unexplained inputs -- "Register on" tells a clinician nothing, "pick what has
+# NOT changed between the two timepoints" tells them everything.
+#
+# Parsed rather than restated because the alternative was tried: the old
+# `ArgSpec` tables carried their own descriptions, drifted from the docstrings
+# beside them, and the two disagreed about which arguments were CBCT-only.
+DOC_ARGUMENTS = "Args:"
 
 # Presentation, and ONLY presentation. A tool may ship a `layout` module beside
 # its package declaring how a client should lay its panel out; these are the
@@ -263,6 +275,96 @@ def is_supervisor(name, parameter, hints):
     return True
 
 
+def doc_block(doc):
+    """The lines under `Args:`, or None if run() has no such section.
+
+    `inspect.getdoc` has already stripped the common indentation, so the
+    section headings sit at column 0 and everything belonging to one is
+    indented. The block ends at the next heading -- Returns, Raises, or plain
+    prose -- which is the first non-blank line back at that margin.
+    """
+    lines = doc.splitlines()
+    for start, line in enumerate(lines):
+        if line.strip() == DOC_ARGUMENTS and not line[:1].isspace():
+            break
+    else:
+        return None
+
+    block = []
+    for line in lines[start + 1:]:
+        if line.strip() and not line[:1].isspace():
+            break
+        block.append(line)
+    return block
+
+
+def doc_entries(block):
+    """`{argument: text}` from an Args block, joining wrapped lines.
+
+    An entry starts at the block's own margin and looks like `name:`; anything
+    indented past it continues the previous entry. A description is one
+    paragraph by the time it reaches a client, so the wrapping the source needs
+    is undone here rather than shipped as newlines a panel renders literally.
+    """
+    margins = [len(line) - len(line.lstrip()) for line in block if line.strip()]
+    margin = min(margins) if margins else 0
+
+    entries = {}
+    name = None
+    for line in block:
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        # `name (type): text` is accepted and the type dropped: the annotation
+        # is the truth about the type, and a docstring repeating it is the
+        # second declaration this script exists to avoid.
+        head = re.match(r"(\w+)\s*(?:\([^)]*\))?\s*:\s*(.*)$", line.strip())
+        if indent == margin and head:
+            name = head.group(1)
+            entries[name] = head.group(2).strip()
+        elif name is not None:
+            entries[name] = (entries[name] + " " + line.strip()).strip()
+    return entries
+
+
+def argument_docs(doc, arguments):
+    """The per-argument help out of run()'s docstring, checked against run().
+
+    Every argument must have a line and no line may name something run() does
+    not take, both for the same reason the layout is checked: a description
+    that quietly goes nowhere is invisible from every end. The old tables were
+    dropped precisely because nothing noticed when they stopped matching.
+    """
+    if not arguments:
+        return {}
+
+    block = doc_block(doc)
+    if block is None:
+        raise SchemaError(
+            "run()'s docstring has no '{}' section. Every argument's description "
+            "is read from it -- without one the client renders a form of "
+            "unexplained fields.".format(DOC_ARGUMENTS)
+        )
+
+    entries = doc_entries(block)
+    unknown = sorted(set(entries) - set(arguments))
+    if unknown:
+        raise SchemaError(
+            "the '{}' section documents {}, which run() does not take. A "
+            "description nothing renders is worse than none: it reads as "
+            "current.".format(DOC_ARGUMENTS, ", ".join(unknown))
+        )
+    undocumented = [name for name in arguments if name not in entries]
+    if undocumented:
+        raise SchemaError(
+            "no description for {}. Add a line under '{}' -- it is what a "
+            "clinician reads next to the control, and a control they have to "
+            "guess at produces a run that succeeds with the wrong "
+            "parameters.".format(", ".join(undocumented), DOC_ARGUMENTS)
+        )
+    return entries
+
+
 def layout_for(package, arguments):
     """The tool's optional panel layout, checked against what it publishes.
 
@@ -410,9 +512,11 @@ def describe_run(run, package=None):
         "arguments": arguments,
         "returns": return_name(hints.get("return", signature.return_annotation)),
     }
-    # Presentation last, and merged INTO the arguments rather than sitting
-    # beside them: a client reads one spec per argument, and a second place to
-    # look is a second place to forget.
+    # The help text, then presentation, both merged INTO the arguments rather
+    # than sitting beside them: a client reads one spec per argument, and a
+    # second place to look is a second place to forget.
+    for name, text in argument_docs(doc, arguments).items():
+        arguments[name]["description"] = text
     for name, hints in layout_for(package, arguments).items() if package else []:
         arguments[name].update(hints)
 
