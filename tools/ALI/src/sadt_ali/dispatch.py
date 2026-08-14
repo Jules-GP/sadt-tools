@@ -160,6 +160,30 @@ def detect(input_path: str, work_dir: str) -> Input:
     )
 
 
+def _check_declared_modality(declared: str, detected: str) -> None:
+    """Refuse a declared modality the data contradicts, at the door.
+
+    The mode has always been read from the DATA, and still is: a folder can hold
+    either kind and a DICOM series has no extension at all, so believing a
+    caller who declares the wrong one means running the wrong engine and calling
+    it a success.
+
+    But a client cannot lay out a panel it has no argument to key on -- both
+    engines' selections are shown at once, and the CBCT user has to know which
+    half to ignore. So the argument exists and is CHECKED. Detection is a
+    directory walk, which is why this costs nothing: a wrong declaration is one
+    clear message in a second, not a failure minutes into a GPU run, which was
+    the whole objection to having the argument at all.
+    """
+    if not declared or declared == detected:
+        return
+    raise ToolInputError(
+        f"This input is {detected} data, but 'modality' says {declared}. ALI reads "
+        f"the modality from the data itself, so this is a mismatch to fix rather "
+        f"than a preference: send {declared} data, or set 'modality' to {detected}."
+    )
+
+
 def _convert_dicom(directories: list, root: str, work_dir: str) -> list:
     """Convert each DICOM series to NIfTI; return (path, key) pairs.
 
@@ -204,6 +228,7 @@ def identify(
     prediction_ID: str = "Pred",
     device: str = "cuda",
     search_seconds: float = 0.0,
+    declared_modality: str = None,
 ) -> dict:
     """Place landmarks on whatever this input holds; return the run report.
 
@@ -226,6 +251,7 @@ def identify(
         # before it had even started. Counts only, never a file name.
         logger.info("ALI: inspecting the input")
         detected = detect(input_path, work_dir)
+        _check_declared_modality(declared_modality, detected.mode)
         logger.info(
             "ALI: %s input, %d scan(s)%s",
             detected.mode,

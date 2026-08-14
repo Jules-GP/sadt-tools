@@ -853,6 +853,7 @@ def test_an_empty_ios_selection_on_ios_input_names_the_argument(tmp_path):
             input=tmp_path / "cohort",
             model=tmp_path,
             output_dir=tmp_path / "out",
+            modality="IOS",
             ios_networks=[],
         )
     message = str(raised.value)
@@ -1145,3 +1146,46 @@ def test_a_degraded_landmark_carries_its_caveat_into_the_file(tmp_path):
     assert points["LL6MG"] == "position estimated from the arch"
     # And a point with nothing to say still says nothing.
     assert points["LL5MG"] == ""
+
+
+def test_a_declared_modality_the_data_contradicts_is_refused(tmp_path):
+    """The mode is still read from the DATA. `modality` exists so a client can
+    show one half of the panel at a time, and it is CHECKED rather than
+    believed: declaring CBCT over a folder of meshes would otherwise run the
+    wrong engine and call it a success."""
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    with pytest.raises(ToolInputError) as raised:
+        run(
+            input=tmp_path / "cohort",
+            model=tmp_path,
+            output_dir=tmp_path / "out",
+            modality="CBCT",
+        )
+    message = str(raised.value)
+    assert "IOS" in message and "CBCT" in message
+
+
+def test_a_declared_modality_that_agrees_runs(tmp_path, stub_agent, cbct_environment):
+    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
+    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
+
+    output_dir = run(
+        input=tmp_path / "cohort", model=bundle, output_dir=tmp_path / "out",
+        modality="CBCT", cbct_regions=CRANIAL_BASE_ONLY,
+    )
+    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
+    assert report["mode"] == "CBCT"
+
+
+def test_the_two_halves_of_the_panel_are_mutually_exclusive():
+    """The visual complaint this argument exists to fix: both engines'
+    selections were shown at once, so a CBCT user had to know which half to
+    ignore."""
+    from sadt_ali import layout
+
+    assert layout.LAYOUT["cbct_regions"]["visible_when"] == {"modality": "CBCT"}
+    assert layout.LAYOUT["landmarks"]["visible_when"] == {"modality": "CBCT"}
+    assert layout.LAYOUT["ios_networks"]["visible_when"] == {"modality": "IOS"}
+    # And the selector itself is always shown, at the top.
+    assert "visible_when" not in layout.LAYOUT["modality"]

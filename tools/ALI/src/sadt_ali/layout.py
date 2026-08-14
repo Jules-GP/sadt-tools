@@ -20,20 +20,28 @@ it simply stopped being told which.
 
 from .cbct import catalog as cbct_catalog
 
-# The collapsible boxes the panel is laid out in. Both engines' selections are
-# always shown -- the schema cannot say "this argument only applies in mode X",
-# because the mode is read from the DATA, not from an argument -- so the least a
-# panel can do is not interleave them: a CBCT user reads one box and ignores the
-# other.
+# The collapsible boxes the panel is laid out in, and which of them a given run
+# shows. `modality` is what makes the two halves mutually exclusive: it does not
+# decide which engine runs -- that is still read from the data, and a
+# declaration the data contradicts is refused -- but a client has to key its
+# layout on SOMETHING, and showing both engines' selections at once means the
+# CBCT user has to know which half to ignore.
 _INPUTS = "Inputs"
 _CBCT = "CBCT landmarks"
 _IOS = "IOS landmarks"
 _OUTPUTS = "Outputs"
 
+_CBCT_ONLY = {"modality": "CBCT"}
+_IOS_ONLY = {"modality": "IOS"}
+
 LAYOUT = {
+    "modality": {"section": _INPUTS, "label": "Input Type"},
     "input": {"section": _INPUTS, "label": "Scan or Folder"},
     "model": {"section": _INPUTS, "label": "Model Bundle"},
-    "cbct_regions": {"section": _CBCT, "label": "Regions", "ui": "inline"},
+    "cbct_regions": {
+        "section": _CBCT, "label": "Regions", "ui": "inline",
+        "visible_when": _CBCT_ONLY,
+    },
     "landmarks": {
         "section": _CBCT,
         "label": "Individual landmarks",
@@ -45,7 +53,11 @@ LAYOUT = {
             display: list(cbct_catalog.GROUP_LABELS[code])
             for display, code in cbct_catalog.REGION_NAMES.items()
         },
+        "visible_when": _CBCT_ONLY,
     },
-    "ios_networks": {"section": _IOS, "label": "Landmark families", "ui": "inline"},
+    "ios_networks": {
+        "section": _IOS, "label": "Landmark families", "ui": "inline",
+        "visible_when": _IOS_ONLY,
+    },
     "prediction_ID": {"section": _OUTPUTS, "label": "Prediction ID"},
 }

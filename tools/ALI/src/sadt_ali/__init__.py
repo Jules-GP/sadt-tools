@@ -31,6 +31,7 @@ def run(
     input: Path,
     model: Path,
     output_dir: Path,
+    modality: Literal["CBCT", "IOS"] = "CBCT",
     # Spelled out because `Literal` takes literals only -- it cannot be built
     # from cbct.catalog.REGION_NAMES. That makes this a second declaration of
     # the same set, which is the thing this contract otherwise avoids, so a
@@ -80,6 +81,12 @@ def run(
             'C' token and an 'Upper' or 'Lower' one, e.g. `Upper_O_model.pth`.
             The two layouts are mutually exclusive, and a bundle that does not
             match the detected mode is an error naming both.
+        modality: Which engine to run. It is CHECKED against the data rather
+            than believed: the input is inspected first, and a declared modality
+            that disagrees with what was actually sent is refused by name,
+            before any weights load. It exists so a client can show one half of
+            the panel at a time — asking a CBCT user to pick intra-oral landmark
+            families is how a form becomes unreadable.
         output_dir: Where results are written -- one `<scan>_lm_<ID>.mrk.json`
             per scan, mirroring the input's own folder tree, plus
             `run_report.json`. Nothing is written outside it.
@@ -118,6 +125,7 @@ def run(
     # and that must not cost a CUDA stack.
     output_dir = Path(output_dir)
     identify(
+        declared_modality=modality,
         input_path=str(input),
         model_path=str(model),
         output_dir=str(output_dir),
