@@ -1,0 +1,18 @@
+# Per-tool environments. `uv.lock` is committed, `.venv/` never is: it is tens
+# of gigabytes of CUDA wheels and it is rebuilt from the lock in one command.
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Scratch space for manual runs: `run()` writes only under the output_dir it is
+# given, so point it here when exercising a tool by hand against real data.
+# Nothing in it is ever committed -- results from patient data least of all.
+output/
+
+# Test fixtures are fetched by tests/data/download.sh, not committed. No large
+# binaries, and no patient data, ever.
+tools/*/tests/data/*
+!tools/*/tests/data/download.sh
+!tools/*/tests/data/*.sha256
