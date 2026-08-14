@@ -6,7 +6,9 @@ tool, two engines that share nothing but their output format:
 - **CBCT** — one deep-RL agent per landmark walks the volume at 1 mm and then at
   0.3 mm until it converges on the point. 119 landmarks across four regions.
 - **IOS** — per tooth, the mesh is rendered from a dozen viewpoints and a 2D
-  UNet predicts masks that are projected back onto the surface.
+  UNet predicts masks that are projected back onto the surface. Three networks:
+  **Occlusal**, **Cervical**, and **Mucogingival** — the last one on the
+  gingival margin rather than the crown, mandible only, off by default.
 
 Which engine runs is decided from the data, never from an argument.
 
@@ -239,10 +241,24 @@ deduplicating that across tools at build time.
 - **GPU tests were run**: `uv run pytest -m "gpu and models"` on an RTX 6000 Ada
   — passed in 38 s, all seven landmarks found, `device=cuda`, every point inside
   the scan's own physical extent.
-- **The IOS half is still unvalidated.** It needs pytorch3d, which is compiled
-  from source and therefore needs a CUDA toolkit; this machine has the driver
-  but no `nvcc`, so `uv sync --extra ios` cannot run here. Its test exists and
-  is marked `ios`. The same wall Crown_Seg hit.
+- **The IOS half, on real weights and a real card** — run inside
+  `ghcr.io/jules-gp/lab-ai:2026.08`, which already carries pytorch3d 0.7.9 (the
+  tag this package pins) and CUDA 12.8, so no source build was needed:
+  - **Input**: `DATA/ALI/testfiles/T1_01_U_segmented.vtk`, a real segmented
+    upper arch. **Weights**: `DATA/ALI/models/ALI_IOS_Models`.
+  - **Occlusal**: **42 landmarks** — 14 teeth × 3 types, every tooth the mesh
+    carries — in 21 s, `device=cuda`, one markups file, no failures.
+  - **Mucogingival on that same maxilla**: correctly produces **nothing** and
+    does not fail the run. `NETWORK_JAWS` restricts it to the mandible, so an
+    upper arch is not a missing model but a question the network cannot be
+    asked — `jaws_without_model` stays empty and the occlusal pass is
+    unaffected.
+- **Mucogingival's predictions are NOT validated.** The only intraoral fixture
+  on hand is an upper arch, and MG runs on the mandible alone, so nothing here
+  has ever placed one of its points. What is verified is the plumbing — the
+  network is offered, off by default, restricted to the lower jaw, its label
+  table is positional, and a degraded point carries its caveat into the file.
+  **A lower-arch mesh is all that is missing**; see tests/data/README.md.
 
 ## Working on it
 

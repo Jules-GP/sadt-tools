@@ -65,3 +65,37 @@ raw arch, or none at all and let the test skip.
 
 Write manual runs into the repository's gitignored `output/` directory, never
 next to the inputs.
+
+
+## Running the IOS half without building pytorch3d
+
+`ghcr.io/jules-gp/lab-ai:2026.08` already carries **pytorch3d 0.7.9** — the tag
+this package pins — plus CUDA 12.8 and torch 2.8.0+cu128, so the IOS engine runs
+there with no source build at all. That is much faster than `uv sync --extra
+ios`, and it is the same stack the deployment uses:
+
+```bash
+docker run --rm --gpus all \
+    -v ~/code/sadt-tools:/repo:ro -v /path/to/DATA:/data:ro -v /tmp/out:/out \
+    ghcr.io/jules-gp/lab-ai:2026.08 bash -lc '
+        pip install -q SimpleITK
+        PYTHONPATH=/repo/tools/ALI/src python3 -c "
+from sadt_ali import run
+run(input=\"/data/ALI/testfiles/T1_01_U_segmented.vtk\",
+    model=\"/data/ALI/models/ALI_IOS_Models\",
+    output_dir=\"/out\", ios_networks=[\"Occlusal\"], device=\"cuda\")"'
+```
+
+`SimpleITK` is the one thing the image lacks; it is a wheel and installs in
+seconds.
+
+## What Mucogingival still needs
+
+**A segmented LOWER arch.** MG was trained on the mandible alone, so the only
+fixture staged here — `T1_01_U_segmented.vtk`, an upper arch — cannot exercise
+it. Running MG against that maxilla correctly produces nothing, which verifies
+the jaw restriction and nothing else.
+
+The weights are already in place (`ALI_IOS_Models/Lower_MG_v6.pth`, 51 MB). Put
+a segmented lower arch beside the upper one and MG can be validated the same way
+as the crown networks.

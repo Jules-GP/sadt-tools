@@ -136,12 +136,22 @@ def test_crownseg_output_feeds_straight_into_ali(tmp_path):
 
 
 @needs_chain
+@pytest.mark.ios
 def test_ali_refuses_an_unsegmented_mesh_and_names_crown_seg(tmp_path):
     """The other half of the chain: what happens when it is skipped.
 
-    Cheap on purpose -- no weights, no GPU. The message is the whole point,
-    because it is what tells whoever sent the request which tool to run first.
+    No weights and no GPU -- but it DOES need pytorch3d, and that is not an
+    oversight in the test. `predict_landmarks` checks the engine's imports
+    before it looks at a single mesh, deliberately: a missing dependency belongs
+    to the venv, not to a patient's data, and reporting it per mesh would bury
+    it behind "produced no landmarks for any mesh". So on a venv synced without
+    the `ios` extra the honest answer really is "no pytorch3d", not "run
+    Crown_Seg first" -- fixing the labels would not help.
+
+    The message is still the whole point, because once the engine CAN run it is
+    what tells whoever sent the request which tool to run first.
     """
+    pytest.importorskip("pytorch3d", reason="needs `uv sync --extra ios`")
     vtk = pytest.importorskip("vtk")
 
     folder = tmp_path / "raw"
