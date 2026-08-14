@@ -1372,3 +1372,18 @@ def test_a_single_uploaded_file_does_not_drag_in_its_neighbours(tmp_path):
         str(work_dir / "input.nii.gz"), str(tmp_path / "scratch" / "input_extracted")
     )
     assert sorted(os.listdir(root)) == ["input.nii.gz"]
+
+
+def test_a_tools_own_run_report_is_not_read_as_landmarks(tmp_path):
+    """`is_markups_file` accepts a bare `.json`, because some markups files are
+    written that way -- so the landmark tool's `run_report.json`, which sits
+    beside its results, was probed on every fully-automated run and skipped with
+    a warning that reads like data loss."""
+    results = tmp_path / "ali_out"
+    _write_markups(results / "patient1_lm_Pred.mrk.json", _REFERENCE_POINTS)
+    (results / "run_report.json").write_text('{"tool": "ALI", "summary": {}}')
+
+    collected = dispatch._collect(str(results))
+
+    assert set(collected) == {"patient1"}
+    assert set(collected["patient1"]) == set(_REFERENCE_POINTS)

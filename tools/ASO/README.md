@@ -190,7 +190,7 @@ tool's, which is what makes this the cheapest tool in the repository to deploy.
   `ios_teeth` (32), `ios_landmark_types` (8), `ios_jaws` (2), `ios_occlusion`
   (3), `modality` (2) and `automation` (2). `sup` is absent from `arguments`, as
   it must be. Asserted out of process against the real venv.
-- **Tests**: 80 passing, 1 GPU test deselected. Six of them run the tool **out of
+- **Tests**: 81 passing, 1 GPU test deselected. Six of them run the tool **out of
   process, in its own venv**, the way the server does — including a complete
   semi-automated CBCT registration on synthetic data, so the registration itself
   is exercised for real rather than stubbed.
@@ -204,17 +204,39 @@ tool's, which is what makes this the cheapest tool in the repository to deploy.
   `test_registration_recovers_the_reference_frame`, and
   `test_the_transform_file_maps_the_result_back_to_the_original` inverts the
   written `.tfm` and lands back on the acquisition.
-- **Not validated against reference output.** No comparison has been made
-  against the pre-port implementation on real patient data, and the
-  `gpu`/`models` chain test has not been run — no CUDA device here and no
-  `ALI_CBCT_Models` bundle staged. Everything needed is in `tests/data/README.md`.
+- **The real chain, on real weights and a real card.** ASO fully-automated CBCT
+  was driven end to end through a real supervisor — one that runs `ALI` in
+  `tools/ALI/.venv` as a subprocess, through `sadt_testkit`'s driver, exactly as
+  the server's runner will. Input `DATA/ALI/testfiles/MG_test_scan.nii.gz` with
+  the 4.7 GB `ALI_CBCT_Models` bundle on an RTX 6000 Ada:
+
+  ```
+  landmark_source: ALI          supervisor calls: 1
+  summary: {'patients': 1, 'oriented': 1, 'failed': 0}
+  landmarks used: ['Ba', 'LOr', 'LPo', 'N', 'ROr', 'RPo', 'S']   dropped: {}
+  outputs: MG_test_Or.nii.gz, MG_test_Or_transform.tfm, MG_test_lm_Or.mrk.json
+  work dir removed: True
+  ```
+
+  All seven landmarks survived the round trip — recentre, hand ALI the centred
+  volumes, read its markups back, merge per patient, register — none dropped as
+  missing or as an outlier. Nothing was imported across the two tools; they have
+  different dependency sets and different venvs.
+- **ALI itself is bit-identical to its pre-port implementation** on the same
+  scan and the same seven landmarks (see [ALI's README](../ALI/README.md)), so
+  what this chain feeds on is the same data the in-process version fed on.
+- **Not compared against the pre-port ASO.** The end-to-end registration has not
+  been diffed against `slicer-remote-tool-server`'s own copy on real patient
+  data. The registration is covered by geometry tests against known rotations,
+  and the seam by the run above, but a numerical comparison of oriented volumes
+  is still owed.
 
 ## Working on it
 
 ```bash
 cd tools/ASO
 uv sync                    # 1.2 GB, no CUDA
-uv run pytest -m "not gpu" # 80 tests, no GPU and no model bundles needed
+uv run pytest -m "not gpu" # 81 tests, no GPU and no model bundles needed
 uv run pytest -m models    # the ALI chain, see tests/data/README.md
 ```
 

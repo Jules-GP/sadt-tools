@@ -405,6 +405,13 @@ def _predict_landmarks(
     return _collect(str(produced) if produced else output_dir)
 
 
+# A tool's own run report sits beside its results and is NOT a markups file --
+# but `is_markups_file` accepts a bare `.json`, because some markups files are
+# written that way. Without this the report is probed on every fully-automated
+# run and skipped with a warning that reads like data loss.
+_NOT_LANDMARKS = ("run_report.json", REPORT_NAME)
+
+
 def _collect(output_dir: str) -> dict:
     """Merge every markups file the landmark tool produced, per patient.
 
@@ -419,6 +426,8 @@ def _collect(output_dir: str) -> dict:
         relative = os.path.relpath(directory, output_dir)
         prefix = "" if relative == "." else relative
         for file_name in sorted(file_names):
+            if file_name in _NOT_LANDMARKS:
+                continue
             if not markups.is_markups_file(file_name) or file_name.startswith("."):
                 continue
             key = os.path.join(prefix, cbct_pipeline.patient_stem(file_name))
