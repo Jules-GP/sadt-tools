@@ -7,27 +7,18 @@ were trained against, so they are reproduced exactly.
 
 import logging
 import os
-import sys
 
 import numpy as np
 
-from base import ToolUnavailableError
+from ..errors import ToolUnavailableError
 
-logger = logging.getLogger("ALI.ios.surface")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
+logger = logging.getLogger(__name__)
 
 # Point-data arrays that carry per-tooth labels, in the order they are tried.
 # The same three names CrownSeg writes and recognizes.
 LABEL_ARRAY_NAMES = ("PredictedID", "UniversalID", "Universal_ID")
 
-_VTK_HINT = "ALI's IOS engine needs VTK: pip install -r requirements.txt"
+_VTK_HINT = "ALI's IOS engine needs VTK. Run `uv sync` in tools/ALI."
 
 
 def import_vtk():
@@ -143,9 +134,9 @@ def surface_properties(scaled_surface, device):
     A mesh with no label array raises instead of falling back to zeros the way
     the original did: zeros mean "every vertex is tooth 0", so no tooth is ever
     found and the run ends reporting no landmarks with no reason given. The
-    caller segments the mesh through CrownSeg instead.
+    engine checks every mesh for labels up front, so this is the backstop.
     """
-    from ..ALI_CBCT.brain import import_torch
+    from ..cbct.brain import import_torch
 
     torch = import_torch()
     _, vtk_to_numpy = import_vtk()

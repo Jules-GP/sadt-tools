@@ -35,10 +35,9 @@ NETWORKS = {
     "C": {"CL": 0, "CB": 1},
 }
 
-# What the schema publishes: display name -> network code, both on by default.
+# What the schema publishes as `choices`: display name -> network code.
 NETWORK_NAMES = {"Occlusal": "O", "Cervical": "C"}
 NETWORK_CODES = tuple(NETWORK_NAMES.values())
-NETWORK_CHOICES = {display_name: True for display_name in NETWORK_NAMES}
 NETWORK_DISPLAY_NAMES = {code: display for display, code in NETWORK_NAMES.items()}
 
 # Radius at which the agent's cameras orbit the tooth, per network. The
@@ -68,16 +67,21 @@ JAWS = ("Upper", "Lower")
 def network_codes(selection) -> tuple:
     """Turn what `run()` received for `ios_networks` into network codes.
 
-    Accepts a `base.Selection` (the HTTP path), None for an omitted optional
-    argument, or a plain sequence of codes, so the engine stays callable by
-    another server-side tool.
+    Display names ("Occlusal") are what the schema publishes and what a client
+    sends; the codes ("O") are accepted too. None means the argument was
+    omitted and both networks are wanted. An unknown name raises, for the same
+    reason `cbct.catalog.region_codes` refuses one.
     """
     if selection is None:
         return NETWORK_CODES
-    if isinstance(selection, dict):
-        return tuple(
-            NETWORK_NAMES[name]
-            for name, enabled in selection.items()
-            if enabled and name in NETWORK_NAMES
-        )
-    return tuple(selection)
+    codes = []
+    for name in selection:
+        if name in NETWORK_NAMES:
+            codes.append(NETWORK_NAMES[name])
+        elif name in NETWORK_CODES:
+            codes.append(name)
+        else:
+            raise ValueError(
+                f"Unknown IOS landmark family {name!r}. Known: {', '.join(NETWORK_NAMES)}."
+            )
+    return tuple(code for code in NETWORK_CODES if code in set(codes))

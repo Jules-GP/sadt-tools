@@ -5,7 +5,7 @@ original carried for training -- loading ground-truth fiducials, sampling
 random poses around a known landmark, computing rewards -- is gone; so is the
 `sys.version_info >= (3, 10)` branch choosing between monai's
 `EnsureChannelFirst` and the `AddChannel` transform removed from monai years
-ago. The server pins monai 1.6, where only the former exists.
+ago. This package pins monai 1.6.0, where only the former exists.
 """
 
 import logging
@@ -14,24 +14,13 @@ import sys
 import numpy as np
 import SimpleITK as sitk
 
-from base import ToolUnavailableError
+from ..errors import ToolUnavailableError
 
 from .brain import import_torch
 
-logger = logging.getLogger("ALI.cbct.environment")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
+logger = logging.getLogger(__name__)
 
-_MONAI_HINT = (
-    "ALI's CBCT engine needs monai. Install it with `pip install -r requirements.txt` "
-    "(see server/README.md)."
-)
+_MONAI_HINT = "ALI's CBCT engine needs monai. Run `uv sync` in tools/ALI."
 
 
 def import_transforms():

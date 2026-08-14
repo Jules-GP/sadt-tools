@@ -14,32 +14,20 @@ this now runs on a server rather than on the user's own machine:
 
 import logging
 import os
-import sys
 
 import numpy as np
 import SimpleITK as sitk
 
-from base import ToolUnavailableError
+from ..errors import ToolUnavailableError
 
-logger = logging.getLogger("ALI.cbct.preprocess")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
+logger = logging.getLogger(__name__)
 
-_ITK_HINT = (
-    "ALI's CBCT engine needs itk for resampling. Install it with "
-    "`pip install -r requirements.txt` (see server/README.md)."
-)
+_ITK_HINT = "ALI's CBCT engine needs itk for resampling. Run `uv sync` in tools/ALI."
 
 
 def import_itk():
-    """itk is imported lazily: registry.py imports every tool at startup, and
-    a missing imaging stack must not keep the whole tool out of the registry.
+    """itk is imported lazily: `describe.py` imports this package on every CI
+    run to publish the schema, and that must not cost an imaging stack.
     """
     try:
         import itk
