@@ -22,9 +22,9 @@ import logging
 import numpy as np
 import SimpleITK as sitk
 
-from base import ToolUnavailableError
+from ..errors import ToolUnavailableError
 
-logger = logging.getLogger("AREG")
+logger = logging.getLogger(__name__)
 
 _INSTALL_HINT = (
     "CBCT registration needs the itk-elastix package. Install it with "

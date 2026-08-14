@@ -32,7 +32,7 @@ import SimpleITK as sitk
 from .. import catalogs, pairing
 from . import elastix
 
-logger = logging.getLogger("AREG")
+logger = logging.getLogger(__name__)
 
 
 def register_patient(

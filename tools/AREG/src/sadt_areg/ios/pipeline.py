@@ -31,7 +31,7 @@ import os
 from .. import catalogs, landmarks as landmark_files, pairing
 from . import butterfly, icp, mgl, surfaces
 
-logger = logging.getLogger("AREG")
+logger = logging.getLogger(__name__)
 
 
 def discover(root: str, suffix: str) -> dict:

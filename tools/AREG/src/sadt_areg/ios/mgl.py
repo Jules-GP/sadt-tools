@@ -39,7 +39,7 @@ from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
 from . import postprocess, surfaces
 
-logger = logging.getLogger("AREG")
+logger = logging.getLogger(__name__)
 
 # Landmark names of the MG model, in arch order. L0MG is the midline (tooth 25),
 # so the right side is shifted by one against the tooth numbers.

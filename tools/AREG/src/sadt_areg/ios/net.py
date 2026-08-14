@@ -21,9 +21,9 @@ needs none of this.
 
 import logging
 
-from base import ToolUnavailableError
+from ..errors import ToolUnavailableError
 
-logger = logging.getLogger("AREG")
+logger = logging.getLogger(__name__)
 
 _INSTALL_HINT = (
     "AREG's IOS mode renders each mesh from several viewpoints, which needs "

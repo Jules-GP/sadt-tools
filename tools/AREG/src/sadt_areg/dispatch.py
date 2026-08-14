@@ -32,12 +32,12 @@ import sys
 import zipfile
 
 import file_utils
-from base import ToolArgumentError
+from .errors import ToolInputError
 from config import settings
 
 from . import catalogs, dicom, pairing, tools_client
 
-logger = logging.getLogger("AREG")
+logger = logging.getLogger(__name__)
 if not logger.handlers:
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -187,11 +187,11 @@ def main(
     modality, automation = str(modality), str(automation)
     suffix = (output_suffix or "Reg").strip() or "Reg"
     if os.sep in suffix or (os.altsep and os.altsep in suffix):
-        raise ToolArgumentError("'output_suffix' is a name fragment, not a path.")
+        raise ToolInputError("'output_suffix' is a name fragment, not a path.")
 
     allowed = catalogs.AUTOMATION_BY_MODALITY.get(modality, ())
     if automation not in allowed:
-        raise ToolArgumentError(
+        raise ToolInputError(
             f"'{automation}' is not a mode {modality} has. {modality} offers: "
             f"{', '.join(allowed)}."
         )
@@ -255,7 +255,7 @@ def _selected(value, choices: dict) -> list:
 
 def _check_cbct(automation: str, regions: list, t1_masks, reference) -> None:
     if not regions:
-        raise ToolArgumentError(
+        raise ToolInputError(
             "Select at least one anatomical region to register on in 'cbct_regions' "
             f"({', '.join(catalogs.REGION_CHOICES)}). Each one is a separate "
             "registration with its own output folder."
@@ -263,7 +263,7 @@ def _check_cbct(automation: str, regions: list, t1_masks, reference) -> None:
 
     if automation == catalogs.AUTOMATION_SEMI:
         if not t1_masks:
-            raise ToolArgumentError(
+            raise ToolInputError(
                 "Semi-Automated CBCT registers inside masks you provide: send the T1 "
                 "segmentations in 't1_masks', or use Fully-Automated mode to have "
                 "them produced server-side."
@@ -277,7 +277,7 @@ def _check_cbct(automation: str, regions: list, t1_masks, reference) -> None:
     if automation == catalogs.AUTOMATION_ORIENTED:
         tools_client.require("ASO", "Oriented + Fully-Automated CBCT registration")
         if not reference:
-            raise ToolArgumentError(
+            raise ToolInputError(
                 "Oriented + Fully-Automated CBCT orients the T1 scans before "
                 "registering onto them, which needs an orientation reference: name "
                 "one in 'cbct_reference' (see GET /tools/AREG/data)."
@@ -286,7 +286,7 @@ def _check_cbct(automation: str, regions: list, t1_masks, reference) -> None:
 
 def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, height) -> None:
     if patch not in catalogs.PATCH_CHOICES:
-        raise ToolArgumentError(
+        raise ToolInputError(
             f"Unknown 'ios_patch' {patch!r}. Expected one of: "
             f"{', '.join(catalogs.PATCH_CHOICES)}."
         )
@@ -305,12 +305,12 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
                 settings.AREG_LANDMARK_TOOL, "Registering on the mucogingival line"
             )
         if height is not None and float(height) < 0:
-            raise ToolArgumentError(
+            raise ToolInputError(
                 "'mgl_patch_height' is a half-height in millimetres and cannot be "
                 "negative. 0 registers on the landmarks alone, without any band."
             )
     elif not registration_model:
-        raise ToolArgumentError(
+        raise ToolInputError(
             "Registering on the palate needs its patch-prediction checkpoint: name "
             "one in 'registration_model' (see GET /tools/AREG/data)."
         )
@@ -320,7 +320,7 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
     tools_client.require("CrownSeg", "Fully-Automated IOS registration")
     tools_client.require("ASO", "Fully-Automated IOS registration")
     if not reference:
-        raise ToolArgumentError(
+        raise ToolInputError(
             "Fully-Automated IOS orients both timepoints before registering, which "
             "needs an orientation reference: name one in 'ios_reference' (see "
             "GET /tools/AREG/data)."
@@ -380,7 +380,7 @@ def _run_cbct(
     matched = pairing.pair(t1_root, t2_root, suffix)
     report["unmatched"] = matched.unmatched_report()
     if not matched:
-        raise ToolArgumentError(
+        raise ToolInputError(
             "No subject appears in both the T1 and the T2 folder. They are paired by "
             "name, up to the timepoint token and a trailing "
             f"{', '.join(catalogs.PATIENT_SUFFIXES[:4])}... -- so 'P1_T1_scan.nii.gz' "
@@ -490,7 +490,7 @@ def _run_ios(
     )
     report["unmatched"] = matched.report()
     if not matched.matched:
-        raise ToolArgumentError(
+        raise ToolInputError(
             f"No subject has a {registered_jaw.lower()} arch at both timepoints, and "
             f"the {ios_patch} patch lives on that arch. Meshes are paired by name, and "
             f"each one has to say which jaw it is with a token in its name (e.g. "

@@ -12,7 +12,7 @@ Corrections, all of which were silent:
 
 * the device was hardcoded. `PredPatch.__init__` did `torch.device("cuda")` and
   every tensor went through `.cuda()`, so a CPU deployment raised inside the
-  first forward pass. The device is `settings.DEVICE` now;
+  first forward pass. The device is an argument now;
 * background pixels voted for the last face. `P_faces[:, pf] += pred` indexes
   with pytorch3d's pixel-to-face map, whose value is **-1** where a pixel hit
   no geometry -- and -1 indexes the last element. Those pixels were zeroed
@@ -25,35 +25,33 @@ Corrections, all of which were silent:
 
 import logging
 import os
-import threading
 
 import numpy as np
 import vtk
 from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 
-from base import ToolArgumentError
-from config import settings
+from ..errors import ToolInputError
 
 from . import net, orientation, postprocess, surfaces
 
-logger = logging.getLogger("AREG")
+logger = logging.getLogger(__name__)
 
 PATCH_ARRAY_NAME = "Butterfly"
 
-# One request may hold several meshes and the server may be serving several
-# requests; the renderer allocates a 320x320x7 rasterization per mesh plus the
-# UNet's activations. Sized like CrownSeg's, which does the same kind of work.
-_gpu_semaphore = threading.Semaphore(settings.AREG_MAX_GPU_JOBS)
+def resolve_device(requested: str = "cuda") -> str:
+    """"cuda" only when a card is actually there, "cpu" otherwise.
 
-
-def resolve_device() -> str:
-    """"cuda" only when a card is actually there, "cpu" otherwise."""
+    The GPU semaphore this module held is gone with the shared server process:
+    a tool is now its own process, so an in-process limit caps nothing. Capping
+    GPU work across concurrent jobs is the server's, and it has to be across
+    tools -- an AREG run and an AMASSS run compete for the same card.
+    """
     torch = net._import_torch()
-    if settings.DEVICE.startswith("cuda") and torch.cuda.is_available():
-        return settings.DEVICE
-    if settings.DEVICE.startswith("cuda"):
-        logger.warning("AREG IOS: DEVICE is %s but no GPU is visible, using cpu", settings.DEVICE)
-    return "cpu"
+    wanted = (requested or "cpu").strip().lower()
+    if wanted.startswith("cuda") and not torch.cuda.is_available():
+        logger.warning("device=%s requested but CUDA is unavailable; falling back to CPU", wanted)
+        return "cpu"
+    return wanted
 
 
 CHECKPOINT_EXTENSIONS = (".ckpt", ".pth")
@@ -81,13 +79,13 @@ def find_checkpoint(model_path: str) -> str:
     )
     name = os.path.basename(str(model_path).rstrip(os.sep))
     if not found:
-        raise ToolArgumentError(
+        raise ToolInputError(
             f"'{name}' holds no {' or '.join(CHECKPOINT_EXTENSIONS)} checkpoint. Fetch the "
             f"published bundle with `./scripts/setup-models.sh --tool AREG`, or name "
             f"another entry in 'registration_model'."
         )
     if len(found) > 1:
-        raise ToolArgumentError(
+        raise ToolInputError(
             f"'{name}' holds several checkpoints "
             f"({', '.join(os.path.basename(path) for path in found)}): "
             f"'registration_model' has to name an entry holding exactly one."
@@ -146,7 +144,7 @@ class PatchPredictor:
         torch = net._import_torch()
 
         vertices, faces, colors = _to_tensors(oriented, self.device)
-        with _gpu_semaphore, torch.no_grad():
+        with torch.no_grad():
             logits, _views, pixel_to_face = self.model((vertices, faces, colors))
             # Zeroed where the pixel hit nothing, so the softmax below is
             # computed on real predictions only.

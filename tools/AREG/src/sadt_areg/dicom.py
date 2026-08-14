@@ -28,7 +28,7 @@ import tempfile
 
 import SimpleITK as sitk
 
-logger = logging.getLogger("AREG")
+logger = logging.getLogger(__name__)
 
 _INSTALL_HINT = (
     "Reading this DICOM series needs the dicom2nifti package. Install it with "
