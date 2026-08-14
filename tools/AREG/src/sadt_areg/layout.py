@@ -24,13 +24,6 @@ _OUTPUTS = "Outputs"
 _CBCT_ONLY = {"modality": catalogs.MODALITY_CBCT}
 _IOS_ONLY = {"modality": catalogs.MODALITY_IOS}
 
-# The masks are the one argument a mode makes meaningless rather than merely
-# optional: in either automated mode AMASSS produces them, and a field offered
-# there reads as something the run needs. Conditions are ANDed, so this is
-# "CBCT, and only when you are supplying them yourself" -- the same sentence
-# the argument's own description opens with.
-_CBCT_SEMI = {"modality": catalogs.MODALITY_CBCT, "automation": catalogs.AUTOMATION_SEMI}
-
 LAYOUT = {
     "t1": {"section": _INPUTS, "label": "T1 (baseline)"},
     "t2": {"section": _INPUTS, "label": "T2 (follow-up)"},
@@ -46,7 +39,13 @@ LAYOUT = {
         "ui": "inline",
         "visible_when": _CBCT_ONLY,
     },
-    "t1_masks": {"section": _CBCT, "label": "T1 masks", "visible_when": _CBCT_SEMI},
+    # Every CBCT mode, not just Semi-Automated: dispatch puts a supplied mask
+    # folder ahead of AMASSS's output in `mask_roots`, so sending your own is a
+    # working override in the automated modes too, not only the mode that
+    # requires it. It reads as mandatory in the panel because the client stars
+    # every file field, which is a client bug and not something to hide the
+    # field over.
+    "t1_masks": {"section": _CBCT, "label": "T1 masks", "visible_when": _CBCT_ONLY},
     "segmentation_model": {
         "section": _CBCT, "label": "Segmentation model", "visible_when": _CBCT_ONLY,
     },
