@@ -21,7 +21,10 @@ from . import catalogs
 
 _INPUTS = "Inputs"
 _CBCT = "Landmark Reference"
-_IOS = "Teeth & Landmarks"
+# "and", not "&": a section title becomes a Qt button, where "&" marks the next
+# character as a keyboard accelerator and is swallowed -- this rendered as
+# "Teeth _Landmarks" in Slicer.
+_IOS = "Teeth and Landmarks"
 _OUTPUTS = "Outputs"
 
 _CBCT_ONLY = {"modality": catalogs.MODALITY_CBCT}
