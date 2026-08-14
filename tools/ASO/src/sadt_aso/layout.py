@@ -1,0 +1,85 @@
+"""How a client should lay this tool's panel out. Presentation only.
+
+Nothing here changes what `run()` accepts — `describe.py` merges these hints
+into the published schema and refuses any that name an argument or an option
+the signature does not offer. Delete this file and the tool still works; the
+panel just gets worse.
+
+ASO is the tool that needs this most, because its **four modes share one
+schema**. Without `visible_when` a panel shows all 115 CBCT landmarks next to
+all 32 teeth, whichever mode is selected, and a clinician has to know which half
+to ignore. The conditions below are the old Slicer module's four-page
+`QStackedWidget` expressed as data instead of as widget code.
+
+**Everything is DERIVED, never restated** — the tabs come from `catalogs`, so a
+landmark or a tooth added there appears in its tab with no edit here. That is
+the difference from the `ArgSpec` tables this replaces, which listed options by
+hand and drifted from the code they described.
+"""
+
+from . import catalogs
+
+_INPUTS = "Inputs"
+_CBCT = "Landmark Reference"
+_IOS = "Teeth & Landmarks"
+_OUTPUTS = "Outputs"
+
+_CBCT_ONLY = {"modality": catalogs.MODALITY_CBCT}
+_IOS_ONLY = {"modality": catalogs.MODALITY_IOS}
+
+LAYOUT = {
+    "input": {"section": _INPUTS, "label": "Scan / Landmark Folder"},
+    "reference": {"section": _INPUTS, "label": "Reference"},
+    "modality": {"section": _INPUTS, "label": "Input Type"},
+    "automation": {"section": _INPUTS, "label": "Mode"},
+    # Landmarks a caller supplies rather than has predicted. Useful in both
+    # modalities, so no condition -- it is the escape hatch that makes
+    # fully-automated work with no landmark tool at all.
+    "landmarks": {"section": _INPUTS, "label": "Landmark folder (optional)"},
+
+    # -- CBCT ---------------------------------------------------------------
+    "cbct_landmarks": {
+        "section": _CBCT,
+        "label": "Registration landmarks",
+        "ui": "tabs",
+        "groups": {
+            group: list(names)
+            for group, names in catalogs.CBCT_LANDMARK_GROUPS.items()
+        },
+        "visible_when": _CBCT_ONLY,
+    },
+    "landmark_model": {
+        "section": _CBCT,
+        "label": "Landmark model bundle",
+        "visible_when": _CBCT_ONLY,
+    },
+    "dicom_input": {
+        "section": _INPUTS,
+        "label": "Input is DICOM",
+        "visible_when": _CBCT_ONLY,
+    },
+
+    # -- IOS ----------------------------------------------------------------
+    "ios_teeth": {
+        "section": _IOS,
+        "label": "Teeth",
+        # A dental chart, one row per arch, in universal-numbering order --
+        # not 32 check boxes stacked in a column.
+        "ui": "tabs",
+        "groups": {jaw: list(teeth) for jaw, teeth in catalogs.TOOTH_GROUPS.items()},
+        "visible_when": _IOS_ONLY,
+    },
+    "ios_landmark_types": {
+        "section": _IOS, "label": "Landmark types", "ui": "inline",
+        "visible_when": _IOS_ONLY,
+    },
+    "ios_jaws": {
+        "section": _IOS, "label": "Jaws", "ui": "inline", "visible_when": _IOS_ONLY,
+    },
+    "ios_occlusion": {
+        "section": _IOS, "label": "Occlusion", "visible_when": _IOS_ONLY,
+    },
+
+    # -- Outputs ------------------------------------------------------------
+    "output_suffix": {"section": _OUTPUTS, "label": "Output suffix"},
+}
