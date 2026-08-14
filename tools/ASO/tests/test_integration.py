@@ -23,6 +23,10 @@ import pytest
 import SimpleITK as sitk
 from sadt_testkit import ToolFailed, is_built, run_tool, tool_schema
 
+# `run_tool` drives a tool the way the server's runner does -- and, like it,
+# injects no supervisor. `scripts/run_tool.py` is what supplies one, so the
+# chain below goes through that rather than through a hand-rolled stand-in.
+
 TOOL = "ASO"
 
 needs_venv = pytest.mark.skipif(
@@ -226,71 +230,106 @@ def test_fully_automated_without_landmarks_is_refused_by_this_runner(case, tmp_p
 # The ALI -> ASO chain, through a real supervisor
 # ---------------------------------------------------------------------------
 
-class LocalSup:
-    """A supervisor that runs the other tool in its own venv, as a subprocess.
-
-    The same shape the server's runner will build, and the same one the fake in
-    `test_run.py` imitates -- five members, duck-typed, nothing imported across
-    tools. `sadt_testkit.run_tool` is doing exactly what the server does, so a
-    chain that works here works there.
-
-    Worth promoting into `sadt_testkit` once a second tool needs it; it lives
-    here while ASO is the only one.
-    """
-
-    def __init__(self, out, tmp):
-        self.out = out
-        self.tmp = tmp
-
-    def run(self, tool, **params):
-        return run_tool(tool, **params)
-
-    def progress(self, fraction, message):
-        pass
-
-    def log(self, message):
-        pass
-
-
 needs_chain = pytest.mark.skipif(
     not (is_built(TOOL) and is_built("ALI")),
     reason="run `uv sync` in tools/ASO and tools/ALI",
 )
 
 
+REAL_SCAN = os.environ.get("SADT_ALI_SCAN")
+REAL_BUNDLE = os.environ.get("SADT_ALI_CBCT_MODELS")
+
+
+def run_cli(tool, **params):
+    """Drive a tool through `scripts/run_tool.py`, which supplies a supervisor.
+
+    `run_tool` above is the server runner's contract and injects none, so the
+    one mode that needs one cannot go through it -- see
+    `test_fully_automated_without_landmarks_is_refused_by_this_runner`.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[3] / "scripts" / "run_tool.py"
+    argv = [sys.executable, str(script), tool]
+    for name, value in params.items():
+        flag = "--" + name.replace("_", "-")
+        if isinstance(value, (list, tuple)):
+            argv += [flag] + [str(item) for item in value]
+        else:
+            argv += [flag, str(value)]
+
+    completed = subprocess.run(argv, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise ToolFailed(
+            "{} exited {}.\n--- stderr (last 40 lines) ---\n{}".format(
+                tool, completed.returncode,
+                "\n".join(completed.stderr.splitlines()[-40:]),
+            )
+        )
+    return Path(completed.stdout.strip())
+
+
 @needs_chain
 @pytest.mark.models
 @pytest.mark.gpu
-def test_fully_automated_cbct_drives_ali_through_the_supervisor(case, tmp_path):
+@pytest.mark.skipif(
+    not (REAL_SCAN and REAL_BUNDLE),
+    reason="set SADT_ALI_SCAN and SADT_ALI_CBCT_MODELS (see tests/data/README.md)",
+)
+def test_fully_automated_cbct_drives_ali_through_the_supervisor(tmp_path):
     """The real chain: ASO recentres, calls ALI on the centred scans, registers.
 
-    Needs the 4.7 GB `ALI_CBCT_Models` bundle and a card; see
-    tests/data/README.md. Everything up to the ALI call is covered by the fake
-    supervisor in `test_run.py`, so what this adds is that the real tool accepts
-    the arguments ASO sends it and returns landmarks ASO can read.
+    A REAL scan, not the synthetic fixture the rest of this module uses: the
+    landmark agent walks an actual head, and a 16-voxel cube is not one -- it
+    converges on nothing, which is a fact about the fixture rather than about
+    the chain.
+
+    The reference is built by running ALI once beforehand, so the registration
+    is close to an identity. What is under test is the SEAM, not the geometry:
+    that ASO hands ALI centred volumes, gets markups back, merges them per
+    patient and registers on them, with each tool in its own venv.
     """
     from pathlib import Path
 
-    import sys
+    scan, bundle = Path(REAL_SCAN), Path(REAL_BUNDLE)
+    points = ["Ba", "S", "N"]
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
-    from sadt_aso import run
+    # The reference: one already-oriented case's landmarks.
+    predicted = run_tool(
+        "ALI", input=scan, model=bundle, output_dir=tmp_path / "ref",
+        landmarks=points, device="cuda",
+    )
+    gold = tmp_path / "gold"
+    gold.mkdir()
+    markups = sorted(Path(predicted).rglob("*.mrk.json"))
+    assert markups, "ALI produced no markups for the reference"
+    (gold / "reference_lm.mrk.json").write_bytes(markups[0].read_bytes())
 
-    scans, reference = case
-    bundle = Path("tests/data/ALI_CBCT_Models").resolve()
-    if not bundle.is_dir():
-        pytest.skip("see tests/data/README.md for the bundle this needs")
+    scans = tmp_path / "input"
+    scans.mkdir()
+    (scans / scan.name).write_bytes(scan.read_bytes())
 
-    output_dir = run(
+    # Through the CLI, because that is what builds a supervisor.
+    output_dir = run_cli(
+        "ASO",
         input=scans,
-        reference=reference,
+        reference=gold,
         output_dir=tmp_path / "out",
         modality="CBCT",
         automation="Fully-Automated",
+        cbct_landmarks=points,
         landmark_models=bundle,
-        sup=LocalSup(out=tmp_path / "out", tmp=tmp_path / "tmp"),
     )
 
     report = json.loads((output_dir / "ASO_report.json").read_text())
     assert report["landmark_source"] == "ALI"
-    assert report["summary"]["oriented"] == 1
+    assert report["summary"] == {"patients": 1, "oriented": 1, "failed": 0}
+    patient = next(iter(report["patients"].values()))
+    assert sorted(patient["landmarks_used"]) == sorted(points)
+    assert not patient["landmarks_dropped"]
+    # Nothing of the tool's own working state survives in what the caller keeps.
+    assert not (output_dir / ".aso_work").exists()
+
+

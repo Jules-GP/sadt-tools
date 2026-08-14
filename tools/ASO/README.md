@@ -113,7 +113,21 @@ CBCT is not servable, and this package's other three modes are. That is the
 expected state: the server keeps serving its own copy meanwhile. See
 [docs/SERVER_CONTRACT.md](../../docs/SERVER_CONTRACT.md).
 
-### Standalone, with no supervisor
+### From a checkout, with a supervisor
+
+`scripts/run_tool.py` builds one and chains for you — no server, no Docker:
+
+```bash
+python scripts/run_tool.py ASO \
+    --input cohort/ --reference gold/ --output-dir out/ \
+    --modality CBCT --automation Fully-Automated \
+    --cbct-landmarks Ba S N --landmark-models /path/to/ALI_CBCT_Models
+```
+
+It runs ALI in `tools/ALI/.venv` as a subprocess, at the point in ASO's run
+where ALI has always been called. See the repository README.
+
+### Standalone, with no supervisor at all
 
 Predict the landmarks yourself and pass the folder. Same registration, same
 result, no supervisor and no repository checkout:

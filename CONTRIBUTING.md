@@ -156,8 +156,13 @@ Check the result before going further:
 
 ```bash
 uv sync
-.venv/bin/python ../../scripts/describe.py .
+.venv/bin/python ../../scripts/describe.py .          # the schema
+python ../../scripts/run_tool.py <Name> --help        # the CLI it implies
 ```
+
+`run_tool.py` builds its parser from the same signature, so `--help` is the
+fastest way to see what you have actually declared — and running it is the
+fastest way to exercise a supervisor without a server.
 
 ## 4. Port the implementation
 
