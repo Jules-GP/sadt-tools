@@ -56,6 +56,10 @@ jobs:
 
       # GPU tests are excluded here because the runner has no CUDA device. They
       # are not optional: run them by hand and state the result in the PR.
+      #
+      # Integration tests that reach for another tool skip themselves here --
+      # each tool gets its own job, so no other tool's .venv exists in this one.
+      # That is what `sadt_testkit.is_built` is for.
       - name: Tests
         working-directory: tools/${{ matrix.tool }}
         run: uv run --frozen pytest -m "not gpu"
@@ -73,3 +77,20 @@ jobs:
         run: uv run --no-project --python 3.12 --with pytest -- pytest scripts/tests -q
       - name: Audit
         run: uv run scripts/audit.py
+
+  # The testkit is what every integration test trusts, so it is tested itself.
+  # It builds tools/_template because that is what its suite runs against, and
+  # the template is the one tool that is always cheap to build.
+  testkit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Build the template it runs against
+        working-directory: tools/_template
+        run: uv sync --frozen
+      - name: Tests
+        working-directory: testkit
+        run: uv run --frozen pytest -q

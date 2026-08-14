@@ -13,16 +13,26 @@ information in full, including the pins kept and the changes made.
 
 | Tool | Upstream path | Upstream commit | Ported | Algorithm modified |
 |---|---|---|---|---|
-| [surgmovpred](tools/surgmovpred/) | — | — | not migrated yet | — |
-| [amasss](tools/amasss/) | — | — | not migrated yet | — |
-| [aso](tools/aso/) | — | — | not migrated yet | — |
-| [ali](tools/ali/) | — | — | not migrated yet | — |
-| [crownseg](tools/crownseg/) | — | — | not migrated yet | — |
-| [batchdentalseg](tools/batchdentalseg/) | — | — | not migrated yet | — |
+| [Surg_Mov_Pred](tools/Surg_Mov_Pred/) | `SurgMovPred_CLI/SurgMovPred_CLI.py` | `d7702ae` (2026-06-24) | 2026-08-12 | no — repackaging only. Model load order sorted for reproducibility, both result tables returned instead of one; predictions bit-identical to the pre-port implementation. |
+| [AMASSS](tools/AMASSS/) | `AMASSS_CLI/` | `21a62a8` (2026-05-22) | 2026-08-12 | no — repackaging only. Pinned to the deployed stack (torch 2.8.0+cu128, nnunetv2 2.8.1) rather than upstream's declared torch 2.2.0 / nnunetv2 2.8.0; masks bit-identical to the pre-port implementation, within nnUNet's own CUDA nondeterminism. |
+| [ASO](tools/ASO/) | `ASO/`, `ASO_CBCT/{PRE,SEMI}_ASO_CBCT/`, `ASO_IOS/{PRE,SEMI}_ASO_IOS/` | **unrecorded** — see below | 2026-08-13 | no — repackaging only. Nothing is pinned upstream; pinned to the imaging stack the sibling tools lock. Fully-automated CBCT reaches the landmark tool through the supervisor at the point it always ran, so the order is unchanged. Driven end to end through a real supervisor on the real bundle and a real card; not yet diffed numerically against the pre-port ASO. |
+| [ALI](tools/ALI/) | `ALI_CBCT/`, `ALI_CBCT_utils/`, `ALI_IOS/`, `ALI_IOS_utils/` | **unrecorded** — see below | 2026-08-13 | no — repackaging only. Pinned to the deployed stack (torch 2.8.0+cu128, monai 1.6.0, itk 5.4.7). One visible behaviour change: an unlabelled IOS mesh is refused naming `Crown_Seg` instead of being segmented in-process. CBCT landmarks **bit-identical** to the pre-port implementation on a real scan (0.0000 mm across 16/16 run pairs, both sides deterministic); the IOS half is unvalidated, pytorch3d needing a CUDA toolkit. |
+| [Crown_Seg](tools/Crown_Seg/) | — (written against `shapeaxi` directly) | shapeaxi 2.0.2 | 2026-08-12 | no — the network is untouched and its raw output is bit-identical. Carries a two-line workaround for a shapeaxi 2.0.x bug that breaks the tool upstream and downstream alike. |
+| [Batch_Dental_Seg](tools/Batch_Dental_Seg/) | `BATCHDENTALSEG/BATCHDENTALSEGLib/SegmentationWidget.py` | `6df3fab` (2026-08-05) | 2026-08-12 | no — repackaging only. Same stack as AMASSS (torch 2.8.0+cu128, nnunetv2 2.8.1); labels compared against the pre-port implementation. |
 
 A row is filled in by the PR that migrates the tool, in the same commit that
 adds the package. "Algorithm modified" is `no` for a pure repackaging and
 otherwise names what changed and why, matching the tool README.
+
+**ALI's and ASO's upstream commits are unrecorded, and that is a gap, not a
+style.** Both server-side ports landed with no upstream revision in the commit
+message and none in the tree — ALI as `ADD ALI & CrownSeg` (`a0ed474`,
+2026-07-31) — so which upstream commit each algorithm came from cannot be
+recovered from either repository. The per-module mappings are exact and are in
+[tools/ALI/README.md](tools/ALI/README.md) and
+[tools/ASO/README.md](tools/ASO/README.md); only the revisions are missing, and
+they need filling in by whoever made those ports. Until then, "no — repackaging
+only" is a claim about code that cannot be pointed at.
 
 `tools/_template/` has no row: it is the reference package the others are copied
 from, not a port.

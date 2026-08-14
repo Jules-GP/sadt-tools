@@ -358,3 +358,71 @@ def test_the_template_describes_itself(tmp_path):
     assert schema["arguments"]["metrics"]["default"] == ["mean", "max"]
     assert schema["arguments"]["metrics"]["choices"] == ["mean", "max", "min", "std"]
     assert schema["arguments"]["reduction"]["choices"] == ["per_scan", "pooled"]
+
+
+# ---------------------------------------------------------------------------
+# The supervisor -- how a tool calls another tool
+# ---------------------------------------------------------------------------
+
+SUPERVISED = """
+    def run(scan: Path, output_dir: Path, *, sup=None) -> Path:
+        \"\"\"Orient a scan onto a reference.\"\"\"
+        return output_dir
+"""
+
+
+def test_the_supervisor_is_not_published_as_an_argument(tmp_path):
+    """It is not data, so a client must never be asked to send it."""
+    result = describe(make_tool(tmp_path, SUPERVISED))
+
+    assert result.returncode == 0, result.stderr
+    schema = json.loads(result.stdout)
+    assert "sup" not in schema["arguments"]
+    assert list(schema["arguments"]) == ["scan", "output_dir"]
+
+
+def test_a_tool_that_takes_one_says_so(tmp_path):
+    """The server has to know before it accepts a job: a runner that cannot
+    inject a supervisor must refuse the tool, not call it and fail halfway."""
+    schema = json.loads(describe(make_tool(tmp_path, SUPERVISED)).stdout)
+    assert schema["supervisor"] is True
+
+
+def test_a_tool_without_one_does_not_carry_the_key(tmp_path):
+    """Absent, not `false`: every tool written before supervisors existed keeps
+    exactly the schema it had."""
+    schema = json.loads(describe(make_tool(tmp_path, GOOD)).stdout)
+    assert "supervisor" not in schema
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        (
+            # Positional: the runner's first argument would land in it.
+            """
+            def run(scan: Path, sup=None) -> Path:
+                \"\"\"Orient a scan.\"\"\"
+                return scan
+            """,
+            "keyword-only",
+        ),
+        (
+            # Annotated: published as a path, so the form grows a file picker
+            # for something no client can produce.
+            """
+            def run(scan: Path, *, sup: Path = None) -> Path:
+                \"\"\"Orient a scan.\"\"\"
+                return scan
+            """,
+            "must not be annotated",
+        ),
+    ],
+)
+def test_a_near_miss_supervisor_fails_loudly(tmp_path, body, expected):
+    """Both of these would otherwise fail a long way from the signature."""
+    result = describe(make_tool(tmp_path, body))
+
+    assert result.returncode == 2
+    assert expected in result.stderr
+    assert result.stdout == ""

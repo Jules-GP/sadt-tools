@@ -31,7 +31,7 @@ is handled by deduplication at build time rather than by convergence.
 
 | Repository | What is in it | Open it to |
 |---|---|---|
-| [slicer-remote-tool-server](https://github.com/Jules-GP/slicer-remote-tool-server) | The generic HTTP server: routes, auth, dispatch, the runner, the `/DATA` store. Knows nothing about dental tools. | Change the API, authentication, job handling or deployment |
+| [slicer-remote-tool-server](https://github.com/Jules-GP/slicer-remote-tool-server) | The generic HTTP server: routes, auth, dispatch, the runner, the `/DATA` store. Knows nothing about dental tools. | Change the API, authentication, job handling or deployment. What it has to do to serve these tools is written down in [docs/SERVER_CONTRACT.md](docs/SERVER_CONTRACT.md) |
 | **sadt-tools** (this one) | One isolated project per tool. Knows nothing about the server. | Change what a tool computes, or the versions it computes it with |
 | [SlicerAutomatedDentalToolsCloud](https://github.com/Jules-GP/SlicerAutomatedDentalToolsCloud) | The thin 3D Slicer client. Discovers everything through `GET /tools`. | Change the user interface |
 | [SlicerAutomatedDentalTools](https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools) | Upstream. The origin of every algorithm here. | Check what a port was ported from |
@@ -82,8 +82,16 @@ tools/<name>/
 ├── src/sadt_<name>/
 │   ├── __init__.py       # defines run()
 │   └── ...               # the ported implementation
-└── tests/test_run.py     # calls run() end to end
+├── tests/
+│   ├── test_run.py       # calls run() end to end
+│   └── test_integration.py   # runs it out of process, and any tool it chains with
+└── ...
 ```
+
+`testkit/` holds `sadt-testkit`, a **development-only** package that lets one
+tool's tests run another through that tool's own venv, as a subprocess. It is
+how a tool whose input is another tool's output gets tested against the real
+thing without importing it. See [testkit/README.md](testkit/README.md).
 
 ## Scripts
 
@@ -128,6 +136,31 @@ python >=3.11 (4) | >=3.9,<3.10 (6)
 
 It is a diagnostic and only ever reads. Aligning a pin is a human decision that
 requires revalidating the model's outputs first.
+
+`scripts/run_tool.py` runs a tool from the command line, in its own venv, and
+chains to other tools when one asks for it. The parser is built from `run()`'s
+signature, so there is no per-tool CLI to keep in step with anything:
+
+```console
+$ python scripts/run_tool.py ALI --input scan.nii.gz --model bundle/ \
+      --output-dir out/ --landmarks Ba S N
+out/
+
+$ python scripts/run_tool.py ASO --input cohort/ --reference gold/ \
+      --output-dir out/ --automation Fully-Automated --landmark-models bundle/
+[sup] 20% predicting landmarks with ALI
+[sup] running ALI
+out/
+```
+
+The second command is the whole point: ASO needs landmarks mid-run, so it is
+given a **supervisor**, and `sup.run("ALI", ...)` re-enters this same script with
+ALI's interpreter. Chaining and nesting are the same recursion — `AREG → ASO →
+ALI` would be three levels of it with no special case.
+
+**Developer convenience, not the deployment path.** In production the server's
+runner does this. It is also the shortest readable reference for what a
+supervisor has to be: five members, duck-typed, nothing shared.
 
 ## Getting started
 

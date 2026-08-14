@@ -1,0 +1,406 @@
+"""End-to-end tests for CrownSeg.
+
+shapeaxi's segmentation is stubbed, so everything around it -- input discovery,
+the already-segmented bypass, the output tree, the run report -- runs for real.
+The network itself cannot run in CI: it lives behind the `segmentation` extra,
+because shapeaxi requires pytorch3d and pytorch3d is compiled from source. That
+is the whole reason it is imported lazily, and `test_real_model_*` is what
+covers it when the extra is installed.
+"""
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from sadt_crownseg import run
+from sadt_crownseg import pipeline
+from sadt_crownseg.errors import ToolInputError, ToolUnavailableError
+
+
+def write_surface(path, labelled=False, array_name="Universal_ID"):
+    vtk = pytest.importorskip("vtk")
+
+    points = vtk.vtkPoints()
+    for coordinates in ((0, 0, 0), (1, 0, 0), (0, 1, 0)):
+        points.InsertNextPoint(*coordinates)
+    polys = vtk.vtkCellArray()
+    polys.InsertNextCell(3)
+    for point_id in range(3):
+        polys.InsertCellPoint(point_id)
+
+    surface = vtk.vtkPolyData()
+    surface.SetPoints(points)
+    surface.SetPolys(polys)
+
+    if labelled:
+        labels = vtk.vtkIntArray()
+        labels.SetName(array_name)
+        for _ in range(3):
+            labels.InsertNextValue(8)
+        surface.GetPointData().AddArray(labels)
+
+    os.makedirs(os.path.dirname(str(path)), exist_ok=True)
+    writer = vtk.vtkPolyDataWriter()
+    writer.SetFileName(str(path))
+    writer.SetInputData(surface)
+    writer.Write()
+    return str(path)
+
+
+@pytest.fixture
+def stub_shapeaxi(monkeypatch, tmp_path):
+    """Write a labelled mesh wherever shapeaxi would have written one."""
+    calls = []
+
+    def fake_run(csv_path, output_dir, model_path, input_root, array_name, suffix,
+                 device, fdi, num_workers=2):
+        calls.append(
+            {
+                "csv": csv_path,
+                "out": output_dir,
+                "model": model_path,
+                "root": input_root,
+                "device": device,
+                "fdi": fdi,
+            }
+        )
+        csv_stem = os.path.splitext(os.path.basename(csv_path))[0]
+        with open(csv_path, encoding="utf-8") as handle:
+            meshes = [line.strip() for line in handle.read().splitlines()[1:] if line.strip()]
+        for mesh in meshes:
+            destination = pipeline._predicted_path(
+                output_dir, csv_stem, suffix, mesh, input_root
+            )
+            write_surface(destination, labelled=True, array_name=array_name)
+
+    monkeypatch.setattr(pipeline, "_run_shapeaxi", fake_run)
+    monkeypatch.setattr(pipeline, "resolve_device", lambda requested=None: "cpu")
+    # The model is a required argument now, so the tests need a file that
+    # exists -- segment_crowns refuses a path that does not.
+    (tmp_path / "model.pth").write_bytes(b"not a real checkpoint")
+    return calls
+
+
+# ---------------------------------------------------------------------------
+# Already-segmented detection
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("array_name", pipeline.LABEL_ARRAY_NAMES)
+def test_every_known_label_array_counts_as_segmented(tmp_path, array_name):
+    mesh = write_surface(tmp_path / "arch.vtk", labelled=True, array_name=array_name)
+    assert pipeline.is_segmented(mesh) is True
+
+
+def test_a_raw_mesh_is_not_segmented(tmp_path):
+    assert pipeline.is_segmented(write_surface(tmp_path / "arch.vtk")) is False
+
+
+def test_an_stl_can_never_be_segmented(tmp_path):
+    """STL carries no point data by construction. The Slicer module copied a
+    "segmented" .stl into its bypass folder and its CLI then globbed for .vtk
+    only, so those meshes were silently never processed at all."""
+    vtk = pytest.importorskip("vtk")
+
+    source = write_surface(tmp_path / "arch.vtk")
+    reader = vtk.vtkPolyDataReader()
+    reader.SetFileName(source)
+    reader.Update()
+    writer = vtk.vtkSTLWriter()
+    writer.SetFileName(str(tmp_path / "arch.stl"))
+    writer.SetInputData(reader.GetOutput())
+    writer.Write()
+
+    assert pipeline.is_segmented(str(tmp_path / "arch.stl")) is False
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+def test_discovery_is_recursive(tmp_path):
+    write_surface(tmp_path / "cohort" / "a" / "one.vtk")
+    write_surface(tmp_path / "cohort" / "b" / "two.vtk")
+
+    meshes = pipeline.discover_meshes(str(tmp_path / "cohort"))
+    assert len(meshes) == 2
+
+
+def test_a_file_of_the_wrong_kind_is_a_422(tmp_path):
+    (tmp_path / "notes.txt").write_text("not a mesh")
+    with pytest.raises(ToolInputError):
+        pipeline.discover_meshes(str(tmp_path / "notes.txt"))
+
+
+def test_an_empty_folder_is_a_422(tmp_path):
+    (tmp_path / "cohort").mkdir()
+    with pytest.raises(ToolInputError):
+        pipeline.discover_meshes(str(tmp_path / "cohort"))
+
+
+# ---------------------------------------------------------------------------
+# Segmentation
+# ---------------------------------------------------------------------------
+
+def test_a_raw_mesh_is_segmented_and_reported(tmp_path, stub_shapeaxi):
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    report = pipeline.segment_crowns(
+        input_path=str(tmp_path / "cohort"),
+        model_path=str(tmp_path / "model.pth"),
+        output_dir=str(tmp_path / "out")
+    )
+
+    assert report["summary"] == {
+        "total": 1, "segmented": 1, "already_segmented": 0, "failed": 0
+    }
+    assert len(report["segmented_meshes"]) == 1
+    assert pipeline.is_segmented(report["segmented_meshes"][0])
+
+
+def test_an_already_segmented_mesh_is_passed_through(tmp_path, stub_shapeaxi):
+    """Minutes of GPU time per mesh, for an array that is already there."""
+    write_surface(tmp_path / "cohort" / "arch.vtk", labelled=True)
+
+    report = pipeline.segment_crowns(
+        input_path=str(tmp_path / "cohort"),
+        model_path=str(tmp_path / "model.pth"),
+        output_dir=str(tmp_path / "out")
+    )
+
+    assert stub_shapeaxi == []  # the network was never invoked
+    assert report["summary"]["already_segmented"] == 1
+    assert pipeline.is_segmented(report["segmented_meshes"][0])
+
+
+def test_skip_segmented_false_re_runs_the_network(tmp_path, stub_shapeaxi):
+    write_surface(tmp_path / "cohort" / "arch.vtk", labelled=True)
+
+    report = pipeline.segment_crowns(
+        input_path=str(tmp_path / "cohort"),
+        model_path=str(tmp_path / "model.pth"),
+        output_dir=str(tmp_path / "out"),
+        skip_segmented=False,
+    )
+    assert len(stub_shapeaxi) == 1
+    assert report["summary"]["segmented"] == 1
+
+
+def test_a_batch_keeps_its_tree(tmp_path, stub_shapeaxi):
+    write_surface(tmp_path / "cohort" / "siteA" / "arch.vtk")
+    write_surface(tmp_path / "cohort" / "siteB" / "arch.vtk")
+
+    report = pipeline.segment_crowns(
+        input_path=str(tmp_path / "cohort"),
+        model_path=str(tmp_path / "model.pth"),
+        output_dir=str(tmp_path / "out")
+    )
+
+    # Two patients with the same base name. Flattened, one would overwrite the
+    # other and the caller would silently get half its cohort back.
+    assert len(report["segmented_meshes"]) == 2
+    assert len(set(report["segmented_meshes"])) == 2
+    assert sorted(report["meshes"]) == [
+        os.path.join("siteA", "arch.vtk"), os.path.join("siteB", "arch.vtk")
+    ]
+
+
+def test_the_input_csv_is_written_under_the_output_dir_and_removed(tmp_path, stub_shapeaxi):
+    """The Slicer module wrote it into the extension's own source folder,
+    which breaks a read-only install and leaves behind a file pointing at the
+    patient's data."""
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    pipeline.segment_crowns(
+        input_path=str(tmp_path / "cohort"),
+        model_path=str(tmp_path / "model.pth"),
+        output_dir=str(tmp_path / "out")
+    )
+    csv_path = stub_shapeaxi[0]["csv"]
+    assert csv_path.startswith(str(tmp_path / "out"))
+    assert not os.path.exists(csv_path), "the work dir does not survive the run"
+
+
+def test_the_run_report_lands_beside_the_results(tmp_path, stub_shapeaxi):
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    report = pipeline.segment_crowns(
+        input_path=str(tmp_path / "cohort"),
+        model_path=str(tmp_path / "model.pth"),
+        output_dir=str(tmp_path / "out")
+    )
+    written = json.loads(
+        open(os.path.join(str(tmp_path / "out"), "run_report.json"), encoding="utf-8").read()
+    )
+    assert written["numbering"] == "Universal"
+    assert written["array_name"] == pipeline.DEFAULT_ARRAY_NAME
+
+
+def test_fdi_numbering_is_passed_through(tmp_path, stub_shapeaxi):
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    report = pipeline.segment_crowns(
+        input_path=str(tmp_path / "cohort"),
+        model_path=str(tmp_path / "model.pth"),
+        output_dir=str(tmp_path / "out"), fdi=True
+    )
+    assert stub_shapeaxi[0]["fdi"] is True
+    assert report["numbering"] == "FDI"
+
+
+def test_a_missing_checkpoint_is_reported_as_an_input_error(tmp_path, stub_shapeaxi):
+    """The model is an argument now, not a name looked up in a data store."""
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    with pytest.raises(ToolInputError, match="checkpoint not found"):
+        pipeline.segment_crowns(
+            input_path=str(tmp_path / "cohort"),
+            model_path=str(tmp_path / "absent.pth"),
+            output_dir=str(tmp_path / "out"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# run()
+# ---------------------------------------------------------------------------
+
+def test_run_returns_the_output_directory_it_was_given(tmp_path, stub_shapeaxi):
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    output = run(
+        meshes=tmp_path / "cohort",
+        model=tmp_path / "model.pth",
+        output_dir=tmp_path / "out",
+    )
+
+    assert output == tmp_path / "out"
+    assert (output / "run_report.json").is_file()
+
+
+def test_run_writes_nothing_outside_the_output_directory(tmp_path, stub_shapeaxi):
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+    before = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+    run(meshes=tmp_path / "cohort", model=tmp_path / "model.pth", output_dir=tmp_path / "out")
+
+    after = sorted(
+        path
+        for path in tmp_path.rglob("*")
+        if path.is_file() and not path.is_relative_to(tmp_path / "out")
+    )
+    assert after == before
+
+
+def test_the_work_dir_does_not_survive_the_run(tmp_path, stub_shapeaxi):
+    write_surface(tmp_path / "cohort" / "arch.vtk")
+
+    output = run(meshes=tmp_path / "cohort", model=tmp_path / "model.pth",
+                 output_dir=tmp_path / "out")
+
+    assert not (output / pipeline.WORK_DIRNAME).exists()
+
+
+def test_the_report_lists_what_a_caller_sequencing_ali_needs(tmp_path, stub_shapeaxi):
+    """The server runs CrownSeg then ALI, so the report has to name the meshes
+    that now carry labels -- ALI no longer imports this tool to find out."""
+    write_surface(tmp_path / "cohort" / "raw.vtk")
+    write_surface(tmp_path / "cohort" / "done.vtk", labelled=True)
+
+    output = run(meshes=tmp_path / "cohort", model=tmp_path / "model.pth",
+                 output_dir=tmp_path / "out")
+
+    with open(output / "run_report.json") as handle:
+        report = json.load(handle)
+
+    assert len(report["segmented_meshes"]) == 2
+    assert all(pipeline.is_segmented(path) for path in report["segmented_meshes"])
+    assert all(Path(path).is_relative_to(output) for path in report["segmented_meshes"])
+
+
+# ---------------------------------------------------------------------------
+# the real engine
+# ---------------------------------------------------------------------------
+
+REAL_MODEL = os.environ.get("SADT_CROWNSEG_MODEL")
+REAL_MESH = os.environ.get("SADT_CROWNSEG_MESH")
+
+
+def test_a_venv_without_the_extra_says_how_to_install_it(tmp_path, monkeypatch):
+    """`uv sync` alone cannot run the network, and has to say so.
+
+    This is the state CI is in and the state a fresh clone is in, so the
+    message is the only thing standing between a maintainer and a bare
+    ModuleNotFoundError from inside shapeaxi.
+    """
+    if _shapeaxi_installed():
+        pytest.skip("the segmentation extra is installed in this venv")
+
+    with pytest.raises(ToolUnavailableError, match="uv sync --extra segmentation"):
+        pipeline._import_dental_model_seg()
+
+
+def _shapeaxi_installed() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("shapeaxi") is not None
+
+
+@pytest.mark.gpu
+@pytest.mark.models
+@pytest.mark.skipif(
+    not (REAL_MODEL and REAL_MESH),
+    reason="set SADT_CROWNSEG_MODEL and SADT_CROWNSEG_MESH (see tests/data/README.md)",
+)
+def test_real_model_labels_a_real_mesh(tmp_path):
+    """The real checkpoint through the real shapeaxi, on a real arch."""
+    output = run(
+        meshes=Path(REAL_MESH),
+        model=Path(REAL_MODEL),
+        output_dir=tmp_path / "out",
+        skip_segmented=False,
+    )
+
+    with open(output / "run_report.json") as handle:
+        report = json.load(handle)
+
+    assert report["summary"]["segmented"] == 1
+    assert report["summary"]["failed"] == 0
+    produced = report["segmented_meshes"][0]
+    assert pipeline.is_segmented(produced)
+
+
+# ---------------------------------------------------------------------------
+# the shapeaxi 2.0.x workaround
+# ---------------------------------------------------------------------------
+
+class _FakeSaxiNets:
+    """shapeaxi 2.0.x: `dental_model_seg` reads DentalModelSeg off this module,
+    and it is not there."""
+
+
+class _FakeSaxiNetsFixed:
+    DentalModelSeg = object()
+
+
+def test_the_workaround_restores_the_name_shapeaxi_looks_for(monkeypatch):
+    import sys
+    import types
+
+    moved = types.ModuleType("shapeaxi.saxi_nets_lightning")
+    moved.DentalModelSeg = object()
+    monkeypatch.setitem(sys.modules, "shapeaxi.saxi_nets_lightning", moved)
+    monkeypatch.setitem(sys.modules, "shapeaxi", types.ModuleType("shapeaxi"))
+
+    broken = _FakeSaxiNets()
+    assert pipeline._restore_moved_class(broken) is True
+    assert broken.DentalModelSeg is moved.DentalModelSeg
+
+
+def test_the_workaround_is_a_no_op_once_upstream_puts_the_name_back():
+    """The guard is what makes this delete itself rather than linger."""
+    fixed = _FakeSaxiNetsFixed()
+    before = fixed.DentalModelSeg
+
+    assert pipeline._restore_moved_class(fixed) is False
+    assert fixed.DentalModelSeg is before

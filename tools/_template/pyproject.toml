@@ -12,7 +12,7 @@ requires-python = ">=3.11,<3.13"
 dependencies = ["numpy==1.26.4"]
 
 [dependency-groups]
-dev = ["pytest==8.3.4"]
+dev = ["pytest==8.3.4", "sadt-testkit"]
 
 [build-system]
 requires = ["hatchling"]
@@ -37,3 +37,10 @@ markers = [
 #
 # [tool.uv.sources]
 # torch = { index = "pytorch-cu118" }
+
+[tool.uv.sources]
+# Development only: lets this tool's tests run ANOTHER tool through that tool's
+# own venv, as a subprocess, the way the server does. It has no dependencies of
+# its own, so it cannot perturb the resolution above. Never move it into
+# [project] dependencies -- see testkit/README.md.
+sadt-testkit = { path = "../../testkit", editable = true }

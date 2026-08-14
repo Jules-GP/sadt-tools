@@ -1,0 +1,51 @@
+[project]
+name = "sadt-amasss"
+version = "0.1.0"
+description = "Segment craniofacial structures on a CBCT scan."
+# 3.11 is the deployment image's interpreter (lab-ai:2026.08, python 3.11.13),
+# which is where every AMASSS result to date was produced.
+requires-python = ">=3.11,<3.12"
+# Pinned to the stack the deployed server actually runs, not to upstream's
+# declared torch 2.2.0 / nnunetv2 2.8.0: nothing has ever run AMASSS on those,
+# so there would be no reference output to validate against. See README.
+dependencies = [
+    "torch==2.8.0",
+    "nnunetv2==2.8.1",
+    "SimpleITK==2.5.6",
+    "numpy==2.3.2",
+    # Surfaces only, but a hard dependency now -- the server-side port had to
+    # cope with VTK being absent from the image and no longer does.
+    "vtk==9.6.2",
+]
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_amasss"]
+
+# `explicit` is load-bearing: without it uv looks for EVERY package on the
+# PyTorch index, and most of them are not there.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+# Development only: lets this tool's tests run ANOTHER tool through that tool's
+# own venv, as a subprocess, the way the server does. It has no dependencies of
+# its own, so it cannot perturb the resolution above. Never move it into
+# [project] dependencies -- see testkit/README.md.
+sadt-testkit = { path = "../../testkit", editable = true }
+torch = { index = "pytorch-cu128" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+    "models: needs the real model bundle and is skipped without it. See tests/data/README.md.",
+]

@@ -1,0 +1,245 @@
+"""run_tool.py builds a CLI from a signature and chains tools through venvs.
+
+The pure parts are tested here directly. The parts that need a built tool run
+`_template` for real -- and skip rather than fail when it has no venv, because a
+contributor working on one tool has no reason to have built the others.
+"""
+
+import json
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+SCRIPTS = Path(__file__).resolve().parent.parent
+REPO_ROOT = SCRIPTS.parent
+sys.path.insert(0, str(SCRIPTS))
+
+import run_tool  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Coercion -- the rule an optional path depends on
+# ---------------------------------------------------------------------------
+
+def test_an_empty_path_stays_empty():
+    """`Path("")` is `PosixPath(".")`, the current directory, and it is TRUTHY.
+
+    Coercing the "not supplied" default of an optional path therefore hands the
+    tool a real directory: ASO read `landmarks=""` as a supplied landmark folder
+    and walked the whole checkout, `.venv` included. Calling `run()` directly in
+    Python keeps the `""` the signature declares, so coercing it here is also
+    what makes the two call paths disagree.
+    """
+    assert run_tool.coerce("", Path) == ""
+    assert not run_tool.coerce("", Path)
+    # And a real path still becomes one.
+    assert run_tool.coerce("out/", Path) == Path("out")
+
+
+def test_lists_of_paths_are_coerced_elementwise():
+    from typing import List
+
+    assert run_tool.coerce(["a", "b"], List[Path]) == [Path("a"), Path("b")]
+
+
+def test_scalars_are_left_alone():
+    assert run_tool.coerce(3, int) == 3
+    assert run_tool.coerce("cuda", str) == "cuda"
+
+
+# ---------------------------------------------------------------------------
+# The parser, built from a signature
+# ---------------------------------------------------------------------------
+
+def _run_with(body):
+    """Compile a `run()` and hand it back, so a test can state its own shape."""
+    namespace = {}
+    exec(compile(textwrap.dedent(body), "<fixture>", "exec"), namespace)
+    return namespace["run"]
+
+
+SIMPLE = """
+    from pathlib import Path
+    from typing import Literal
+
+    def run(scans: Path, output_dir: Path, device: Literal["cuda", "cpu"] = "cuda",
+            crop: bool = False, keep: bool = True, margin: float = 1.5,
+            structures: list[Literal["MAND", "MAX"]] = ["MAND"]) -> Path:
+        \"\"\"Segment things.\"\"\"
+        return output_dir
+"""
+
+
+def test_options_are_named_after_the_arguments():
+    parser = run_tool.build_parser(_run_with(SIMPLE), "Fixture")
+    parsed = parser.parse_args(["--scans", "in/", "--output-dir", "out/"])
+
+    assert parsed.scans == "in/"
+    assert parsed.output_dir == "out/"
+    # Underscores become dashes on the command line, never in the dest.
+    assert run_tool.option_name("output_dir") == "--output-dir"
+
+
+def test_an_argument_without_a_default_is_required():
+    parser = run_tool.build_parser(_run_with(SIMPLE), "Fixture")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--scans", "in/"])  # no --output-dir
+
+
+def test_defaults_come_from_the_signature():
+    parser = run_tool.build_parser(_run_with(SIMPLE), "Fixture")
+    parsed = parser.parse_args(["--scans", "in/", "--output-dir", "out/"])
+
+    assert parsed.device == "cuda"
+    assert parsed.margin == 1.5
+    assert parsed.structures == ["MAND"]
+
+
+def test_a_literal_is_validated_as_choices():
+    parser = run_tool.build_parser(_run_with(SIMPLE), "Fixture")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--scans", "in/", "--output-dir", "out/", "--device", "tpu"])
+
+
+def test_a_bool_gets_a_flag_and_its_negation():
+    """A tool's default may be either, so `--no-keep` has to exist for
+    `keep=True` just as `--crop` does for `crop=False`."""
+    parser = run_tool.build_parser(_run_with(SIMPLE), "Fixture")
+    base = ["--scans", "in/", "--output-dir", "out/"]
+
+    assert parser.parse_args(base).crop is False
+    assert parser.parse_args(base + ["--crop"]).crop is True
+    assert parser.parse_args(base).keep is True
+    assert parser.parse_args(base + ["--no-keep"]).keep is False
+
+
+def test_a_long_option_list_is_validated_but_not_printed():
+    """ALI publishes 119 landmarks and argparse spells every one of them into
+    the usage line, which makes `--help` unreadable."""
+    many = ", ".join('"L{}"'.format(index) for index in range(30))
+    run = _run_with("""
+        from pathlib import Path
+        from typing import Literal
+
+        def run(output_dir: Path, points: list[Literal[{}]] = []) -> Path:
+            \"\"\"Place points.\"\"\"
+            return output_dir
+    """.format(many))
+    parser = run_tool.build_parser(run, "Fixture")
+
+    assert "L0,L1" not in parser.format_usage().replace(" ", "")
+    # Still refused, though.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--output-dir", "out/", "--points", "NOPE"])
+
+
+# ---------------------------------------------------------------------------
+# The supervisor
+# ---------------------------------------------------------------------------
+
+SUPERVISED = """
+    from pathlib import Path
+
+    def run(scans: Path, output_dir: Path, *, sup=None) -> Path:
+        \"\"\"Orient things.\"\"\"
+        return output_dir
+"""
+
+
+def test_a_supervisor_is_detected_and_kept_off_the_command_line():
+    run = _run_with(SUPERVISED)
+    assert run_tool.takes_supervisor(run) is True
+
+    parser = run_tool.build_parser(run, "Fixture")
+    assert "--sup" not in parser.format_usage()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--scans", "in/", "--output-dir", "out/", "--sup", "x"])
+
+
+def test_a_tool_without_one_is_not_given_one():
+    assert run_tool.takes_supervisor(_run_with(SIMPLE)) is False
+
+
+def test_the_supervisor_exposes_exactly_the_five_members(tmp_path):
+    """The frozen interface. A tool cannot tell this from the server's."""
+    sup = run_tool.LocalSupervisor(out=tmp_path / "out", tmp=tmp_path)
+
+    for member in ("run", "out", "tmp", "progress", "log"):
+        assert hasattr(sup, member), member
+    assert sup.out.is_absolute() and sup.tmp.is_absolute()
+
+
+def test_supervisor_paths_are_absolute(tmp_path, monkeypatch):
+    """The callee starts from a NEUTRAL working directory -- which is what makes
+    "writes only under output_dir" testable -- so a relative path handed across
+    that boundary resolves against the wrong place."""
+    monkeypatch.chdir(tmp_path)
+    sup = run_tool.LocalSupervisor(out="out", tmp=".")
+
+    assert sup.out.is_absolute()
+    assert sup.tmp.is_absolute()
+
+
+def test_an_unknown_tool_says_what_exists():
+    with pytest.raises(run_tool.ToolNotBuilt) as raised:
+        run_tool.tool_python("NoSuchTool")
+    assert "NoSuchTool" in str(raised.value)
+    assert "_template" in str(raised.value)
+
+
+# ---------------------------------------------------------------------------
+# End to end, through a real venv
+# ---------------------------------------------------------------------------
+
+def _built(name):
+    try:
+        run_tool.tool_python(name)
+    except run_tool.ToolNotBuilt:
+        return False
+    return True
+
+
+needs_template = pytest.mark.skipif(
+    not _built("_template"), reason="run `cd tools/_template && uv sync` first"
+)
+
+
+@needs_template
+def test_a_tool_runs_in_its_own_venv(tmp_path):
+    import numpy as np
+
+    scans = tmp_path / "scans"
+    scans.mkdir()
+    np.save(scans / "a.npy", np.arange(100, dtype=np.float32))
+
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPTS / "run_tool.py"), "_template",
+         "--scans", str(scans), "--output-dir", str(tmp_path / "out")],
+        capture_output=True, text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    produced = Path(completed.stdout.strip())
+    assert produced.is_file()
+    assert "mean=50.0" in produced.read_text()
+
+
+@needs_template
+def test_the_tool_runs_under_its_own_interpreter_not_the_callers(tmp_path):
+    """uv's venvs all symlink `bin/python` to the same CPython, so comparing
+    resolved binaries makes every tool look like every other one -- and the
+    callee would be imported into its CALLER's environment, which is exactly
+    the dependency mixing this repository exists to prevent."""
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPTS / "run_tool.py"), "_template",
+         "--scans", str(tmp_path), "--output-dir", str(tmp_path / "out"),
+         "--print-prefix"],
+        capture_output=True, text=True,
+    )
+    # The option does not exist; what matters is that the FAILURE came from the
+    # tool's own parser, i.e. the re-exec happened.
+    assert completed.returncode != 0
+    assert "run_tool.py _template" in completed.stderr
