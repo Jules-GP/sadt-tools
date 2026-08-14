@@ -25,9 +25,16 @@ def coerce(value, annotation):
     Only paths need it -- JSON has no path type, so they travel as strings.
     Everything else the schema allows (str, int, float, bool, and lists of
     them) is already the right type on arrival.
+
+    An empty string is ABSENCE and stays a string. `Path("")` is
+    `PosixPath(".")` -- the current directory, and truthy -- so coercing the
+    "not supplied" default of an optional path turns it into a real directory
+    the tool then walks. Calling `run()` directly in Python keeps the `""` the
+    signature declares, so coercing it here is also what makes the two paths
+    disagree.
     """
     if annotation is Path:
-        return Path(value)
+        return Path(value) if value != "" else value
     if typing.get_origin(annotation) is list and typing.get_args(annotation) == (Path,):
         return [Path(item) for item in value]
     return value

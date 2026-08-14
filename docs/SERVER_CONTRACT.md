@@ -139,6 +139,21 @@ Two details from it worth carrying over:
 - **Coerce by annotation.** JSON has no path type, so paths arrive as strings and
   must become `Path` for parameters annotated `Path` (or `list[Path]`).
   `typing.get_type_hints(run)` is how the driver decides.
+- **An empty string is ABSENCE and must stay a string.** `Path("")` is
+  `PosixPath(".")` — the current directory, and truthy — so coercing the
+  "not supplied" default of an optional path hands the tool a real directory.
+  This is not hypothetical: it made `ASO` read an unset `landmarks=""` as a
+  supplied landmark folder and walk the entire checkout, `.venv` included.
+  Calling `run()` directly in Python keeps the `""` the signature declares, so
+  coercing it is also what makes the two call paths disagree. One line:
+
+  ```python
+  return Path(value) if value != "" else value
+  ```
+
+  `run_tool.py` and the testkit driver both do this; the server's runner must
+  too. It is the price of `describe.py` refusing `None` defaults — an optional
+  path has no other way to say "unset".
 - **Never parse the result off stdout.** These tools print progress bars, nnUNet
   banners and shapeaxi chatter. The driver writes the result to a file whose path
   it is given. Anything scraped from stdout breaks the first time a dependency
@@ -299,6 +314,20 @@ What the server has to provide:
 - an object with five members — `run(tool, **params)`, `out`, `tmp`,
   `progress(fraction, message)`, `log(message)` — passed as the keyword-only
   `sup`. Nothing is imported across the two repositories; it is duck-typed.
+  **[`scripts/run_tool.py`](../scripts/run_tool.py) is a working one**, in about
+  fifty lines, and the shortest readable reference for this section.
+- **Select the callee by VENV, not by interpreter.** uv's venvs all symlink
+  `bin/python` to the same underlying CPython, so dispatching on the resolved
+  binary makes every tool look like every other one — and the callee gets
+  imported into its *caller's* environment, which is precisely the dependency
+  mixing the split exists to prevent. Compare `sys.prefix` against
+  `<TOOLS_DIR>/<name>/.venv`. This one cost an hour to find.
+- **Absolute paths across the boundary.** The callee should start from a neutral
+  working directory — that is what makes "writes only under `output_dir`"
+  testable — so every path handed to it must already be absolute.
+- **The supervisor's own scratch does not belong in `output_dir`.** The tool is
+  held to writing only inside it; whatever drives the tool should not undo that
+  from the other side.
 - `sup.run` invokes the named tool the way the runner does — its own venv, its
   own interpreter — and returns what that tool returned: a `Path`, or a
   `dict[str, Path]`.
