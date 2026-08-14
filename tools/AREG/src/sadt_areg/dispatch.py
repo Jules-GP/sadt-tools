@@ -20,7 +20,7 @@ Two entry points, for the same reason AMASSS and ASO have two:
 
 The Slicer widget built a list of CLI invocations per mode and ran them in
 order, passing folders between them. That structure survives, but the steps are
-the server's own tools -- see `tools_client.py` for why they are called
+the other packaged tools -- see `tools.py` for how they are called
 in-process and through the registry.
 """
 
@@ -29,13 +29,10 @@ import logging
 import os
 import shutil
 import sys
-import zipfile
 
-import file_utils
 from .errors import ToolInputError
-from config import settings
 
-from . import catalogs, dicom, pairing, tools_client
+from . import catalogs, dicom, pairing, tools
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -47,7 +44,12 @@ if not logger.handlers:
     )
     logger.addHandler(_handler)
 
-REPORT_NAME = "AREG_report.json"
+logger = logging.getLogger(__name__)
+
+# Intermediates live here, under the output directory the caller owns, and are
+# removed before `register` returns. A surviving `.areg_work/` means a run
+# crashed.
+WORK_DIRNAME = ".areg_work"
 
 
 class RegistrationRun:
@@ -92,19 +94,21 @@ def register(
     mgl_patch_height: float = None,
     dicom_input: bool = False,
     output_suffix: str = "Reg",
-    scratch_dir: str = None,
+    output_dir: str = None,
+    sup=None,
 ) -> RegistrationRun:
     """Register every T2 under `t2_path` onto its T1 under `t1_path`.
 
     Each path is a directory or a `.zip`. `regions` are the display names
     declared in `catalogs.REGION_CHOICES` (CBCT only).
     """
-    scratch_dir = scratch_dir or file_utils.make_scratch_dir("AREG_")
-    output_dir = os.path.join(scratch_dir, f"AREG_{output_suffix}")
+    output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
+    work_dir = os.path.join(output_dir, WORK_DIRNAME)
+    os.makedirs(work_dir, exist_ok=True)
 
-    t1_root = _as_directory(t1_path, os.path.join(scratch_dir, "t1_input"))
-    t2_root = _as_directory(t2_path, os.path.join(scratch_dir, "t2_input"))
+    t1_root = _as_directory(t1_path, os.path.join(work_dir, "t1_input"))
+    t2_root = _as_directory(t2_path, os.path.join(work_dir, "t2_input"))
 
     report = {
         "modality": modality,
@@ -125,7 +129,7 @@ def register(
             orientation_reference=orientation_reference,
             dicom_input=dicom_input,
             output_dir=output_dir,
-            scratch_dir=scratch_dir,
+            work_dir=work_dir,
             suffix=output_suffix,
             report=report,
         )
@@ -144,10 +148,15 @@ def register(
                 mgl.DEFAULT_HEIGHT if mgl_patch_height is None else float(mgl_patch_height)
             ),
             output_dir=output_dir,
-            scratch_dir=scratch_dir,
+            work_dir=work_dir,
             suffix=output_suffix,
             report=report,
         )
+
+    # Extracted inputs, converted DICOM, the oriented copies and whatever the
+    # tools it drove wrote. Removed whether or not the run succeeded, so what is
+    # left under output_dir is results and nothing else.
+    shutil.rmtree(work_dir, ignore_errors=True)
 
     _summarize(report)
     with open(os.path.join(output_dir, REPORT_NAME), "w") as handle:
@@ -176,13 +185,16 @@ def main(
     mgl_patch_height=None,
     dicom_input=False,
     output_suffix="Reg",
+    output_dir=None,
+    sup=None,
 ) -> str:
     """Translate the schema's arguments into `register()` and return its output
     directory, which main.py zips and streams.
 
     Every cross-argument rule is checked HERE, before any file is read: a
-    request that cannot work must come back as a 422 in a second, not after an
-    hour of registration.
+    request that cannot work must come back in a second, not after an hour of
+    registration. `require` in tools.py is part of that: a mode that needs
+    another tool fails at the door when there is no supervisor to reach it.
     """
     modality, automation = str(modality), str(automation)
     suffix = (output_suffix or "Reg").strip() or "Reg"
@@ -207,7 +219,6 @@ def main(
         _check_ios(automation, patch, registration_model, reference, mgl_landmarks,
                    mgl_patch_height)
 
-    scratch_dir = file_utils.make_scratch_dir("AREG_")
     run = register(
         t1_path=str(t1),
         t2_path=str(t2),
@@ -224,14 +235,10 @@ def main(
         mgl_patch_height=mgl_patch_height,
         dicom_input=bool(dicom_input),
         output_suffix=suffix,
-        scratch_dir=scratch_dir,
+        output_dir=output_dir,
+        sup=sup,
     )
 
-    # The archive should hold results, not the working copies they came from.
-    for intermediate in (
-        "t1_input", "t2_input", "masks_input", "dicom_t1", "dicom_t2", "mgl_landmarks"
-    ):
-        shutil.rmtree(os.path.join(scratch_dir, intermediate), ignore_errors=True)
     return run.output_dir
 
 
@@ -273,9 +280,9 @@ def _check_cbct(automation: str, regions: list, t1_masks, reference) -> None:
     # Both automated modes need the segmentation; the oriented one also needs
     # the orientation. Checked before the input is extracted -- with the tool
     # absent, the answer is the same whatever the rest of the request says.
-    tools_client.require("AMASSS", f"{automation} CBCT registration")
+    tools.require(sup, "AMASSS", f"{automation} CBCT registration")
     if automation == catalogs.AUTOMATION_ORIENTED:
-        tools_client.require("ASO", "Oriented + Fully-Automated CBCT registration")
+        tools.require(sup, "ASO", "Oriented + Fully-Automated CBCT registration")
         if not reference:
             raise ToolInputError(
                 "Oriented + Fully-Automated CBCT orients the T1 scans before "
@@ -301,9 +308,7 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
         # server. Sending them is for a folder that already has them, which also
         # lets a run be repeated without paying for the prediction again.
         if not mgl_landmarks:
-            tools_client.require(
-                settings.AREG_LANDMARK_TOOL, "Registering on the mucogingival line"
-            )
+            tools.require(sup, "ALI", "Registering on the mucogingival line")
         if height is not None and float(height) < 0:
             raise ToolInputError(
                 "'mgl_patch_height' is a half-height in millimetres and cannot be "
@@ -317,8 +322,8 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
 
     if automation != catalogs.AUTOMATION_FULLY:
         return
-    tools_client.require("CrownSeg", "Fully-Automated IOS registration")
-    tools_client.require("ASO", "Fully-Automated IOS registration")
+    tools.require(sup, "Crown_Seg", "Fully-Automated IOS registration")
+    tools.require(sup, "ASO", "Fully-Automated IOS registration")
     if not reference:
         raise ToolInputError(
             "Fully-Automated IOS orients both timepoints before registering, which "
@@ -333,7 +338,7 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
 
 def _run_cbct(
     t1_root, t2_root, t1_masks_path, automation, regions, segmentation_model,
-    segmentation_label, orientation_reference, dicom_input, output_dir, scratch_dir,
+    segmentation_label, orientation_reference, dicom_input, output_dir, work_dir,
     suffix, report,
 ) -> None:
     # Imported here rather than at module level: the CBCT engine pulls in
@@ -345,8 +350,8 @@ def _run_cbct(
     elastix.check_dependencies()
 
     if dicom_input:
-        t1_root = dicom.convert_tree(t1_root, os.path.join(scratch_dir, "dicom_t1"))
-        t2_root = dicom.convert_tree(t2_root, os.path.join(scratch_dir, "dicom_t2"))
+        t1_root = dicom.convert_tree(t1_root, os.path.join(work_dir, "dicom_t1"))
+        t2_root = dicom.convert_tree(t2_root, os.path.join(work_dir, "dicom_t2"))
 
     codes = [catalogs.region_code(name) for name in regions]
     report["regions"] = list(regions)
@@ -356,7 +361,8 @@ def _run_cbct(
     # oriented: it is about to be resampled into the T1's frame anyway, and
     # orienting it first would be one more interpolation of the same data.
     if automation == catalogs.AUTOMATION_ORIENTED:
-        oriented = tools_client.orient_scans(
+        oriented = tools.orient_scans(
+            sup,
             t1_root, orientation_reference, catalogs.MODALITY_CBCT
         )
         report["oriented_t1"] = True
@@ -365,14 +371,14 @@ def _run_cbct(
     # Step 2 -- the masks the registration is confined to.
     mask_roots = []
     if t1_masks_path:
-        mask_roots.append(_as_directory(t1_masks_path, os.path.join(scratch_dir, "masks_input")))
+        mask_roots.append(_as_directory(t1_masks_path, os.path.join(work_dir, "masks_input")))
     if automation == catalogs.AUTOMATION_SEMI:
         # Where the original looked when no mask folder was given.
         mask_roots.append(t1_root)
     else:
         structures = [catalogs.REGION_MASK_STRUCTURES[code] for code in codes]
         mask_roots.append(
-            tools_client.segment_masks(t1_root, segmentation_model, structures)
+            tools.segment_masks(sup, t1_root, segmentation_model, structures)
         )
         report["segmented_t1"] = sorted(structures)
 
@@ -447,7 +453,7 @@ def _roll_up_regions(patients: dict) -> None:
 def _run_ios(
     t1_root, t2_root, automation, registration_model, orientation_reference,
     ios_patch, mgl_landmarks_path, mgl_patch_height,
-    output_dir, scratch_dir, suffix, report,
+    output_dir, work_dir, suffix, report,
 ) -> None:
     # Imported here rather than at module level: the IOS engine pulls in torch,
     # monai and pytorch3d, and AREG must load (and register CBCT scans) on a
@@ -474,12 +480,14 @@ def _run_ios(
         # Label the crowns, then orient -- the order the Slicer chain used, and
         # the necessary one: ASO's fully-automated IOS mode aligns a mesh by its
         # tooth centroids, so the labels have to exist first.
-        t1_root = tools_client.label_crowns(t1_root)
-        t2_root = tools_client.label_crowns(t2_root)
-        t1_root = tools_client.orient_scans(
+        t1_root = tools.label_crowns(sup, t1_root)
+        t2_root = tools.label_crowns(sup, t2_root)
+        t1_root = tools.orient_scans(
+            sup,
             t1_root, orientation_reference, catalogs.MODALITY_IOS
         )
-        t2_root = tools_client.orient_scans(
+        t2_root = tools.orient_scans(
+            sup,
             t2_root, orientation_reference, catalogs.MODALITY_IOS
         )
         report["labelled_and_oriented"] = True
@@ -510,14 +518,14 @@ def _run_ios(
     else:
         if mgl_landmarks_path:
             landmark_root = _as_directory(
-                mgl_landmarks_path, os.path.join(scratch_dir, "mgl_landmarks")
+                mgl_landmarks_path, os.path.join(work_dir, "mgl_landmarks")
             )
             report["mgl_landmarks"] = "sent with the request"
         else:
             # Both timepoints into ONE folder: `landmarks.for_scan` keys on the
             # scan's own name, timepoint included, so T1's and T2's files coexist
             # -- and one call is one model load instead of two.
-            landmark_root = os.path.join(scratch_dir, "mgl_predicted")
+            landmark_root = os.path.join(work_dir, "mgl_predicted")
             os.makedirs(landmark_root, exist_ok=True)
             for root in (t1_root, t2_root):
                 # No model named: ALI picks the hosted bundle matching the input
@@ -526,10 +534,10 @@ def _run_ios(
                 # holds the palatal checkpoint and the orientation references,
                 # none of which is a landmark bundle.
                 _merge_into(
-                    tools_client.predict_mucogingival(root, tool_name=settings.AREG_LANDMARK_TOOL),
+                    tools.predict_mucogingival(sup, root, tool_name="ALI"),
                     landmark_root,
                 )
-            report["mgl_landmarks"] = f"predicted by '{settings.AREG_LANDMARK_TOOL}'"
+            report["mgl_landmarks"] = "predicted by 'ALI'"
 
         painter = ios_pipeline.MGLPainter(landmark_root, height=mgl_patch_height)
         report["mgl_patch_height_mm"] = mgl_patch_height
@@ -609,14 +617,6 @@ def _as_directory(path: str, destination: str) -> str:
     path = str(path)
     if os.path.isdir(path):
         return path
-
-    if zipfile.is_zipfile(path):
-        return file_utils.extract_zip(
-            path,
-            extract_dir=destination,
-            strip_single_root=True,
-            max_total_bytes=settings.MAX_EXTRACTED_MB * 1024 * 1024,
-        )
 
     os.makedirs(destination, exist_ok=True)
     linked = os.path.join(destination, os.path.basename(path))
