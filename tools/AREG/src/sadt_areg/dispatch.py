@@ -28,23 +28,14 @@ import json
 import logging
 import os
 import shutil
-import sys
 
 from .errors import ToolInputError
 
 from . import catalogs, dicom, pairing, tools
 
 logger = logging.getLogger(__name__)
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _handler = logging.StreamHandler(sys.stdout)
-    _handler.setFormatter(
-        logging.Formatter("%(name)s - %(levelname)s - (%(filename)s:%(lineno)d) - %(message)s")
-    )
-    logger.addHandler(_handler)
 
-logger = logging.getLogger(__name__)
+REPORT_NAME = "AREG_report.json"
 
 # Intermediates live here, under the output directory the caller owns, and are
 # removed before `register` returns. A surviving `.areg_work/` means a run
@@ -132,6 +123,7 @@ def register(
             work_dir=work_dir,
             suffix=output_suffix,
             report=report,
+            sup=sup,
         )
     else:
         from .ios import mgl
@@ -151,6 +143,7 @@ def register(
             work_dir=work_dir,
             suffix=output_suffix,
             report=report,
+            sup=sup,
         )
 
     # Extracted inputs, converted DICOM, the oriented copies and whatever the
@@ -212,12 +205,12 @@ def main(
     if modality == catalogs.MODALITY_CBCT:
         regions = _selected(cbct_regions, catalogs.REGION_CHOICES)
         reference = cbct_reference
-        _check_cbct(automation, regions, t1_masks, reference)
+        _check_cbct(automation, regions, t1_masks, reference, sup)
     else:
         regions = []
         reference = ios_reference
         _check_ios(automation, patch, registration_model, reference, mgl_landmarks,
-                   mgl_patch_height)
+                   mgl_patch_height, sup)
 
     run = register(
         t1_path=str(t1),
@@ -260,7 +253,7 @@ def _selected(value, choices: dict) -> list:
     return [name for name in choices if name in wanted]
 
 
-def _check_cbct(automation: str, regions: list, t1_masks, reference) -> None:
+def _check_cbct(automation: str, regions: list, t1_masks, reference, sup=None) -> None:
     if not regions:
         raise ToolInputError(
             "Select at least one anatomical region to register on in 'cbct_regions' "
@@ -291,7 +284,8 @@ def _check_cbct(automation: str, regions: list, t1_masks, reference) -> None:
             )
 
 
-def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, height) -> None:
+def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, height,
+               sup=None) -> None:
     if patch not in catalogs.PATCH_CHOICES:
         raise ToolInputError(
             f"Unknown 'ios_patch' {patch!r}. Expected one of: "
@@ -339,7 +333,7 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
 def _run_cbct(
     t1_root, t2_root, t1_masks_path, automation, regions, segmentation_model,
     segmentation_label, orientation_reference, dicom_input, output_dir, work_dir,
-    suffix, report,
+    suffix, report, sup=None,
 ) -> None:
     # Imported here rather than at module level: the CBCT engine pulls in
     # SimpleITK and itk-elastix, and AREG must load on a server without them so
@@ -453,7 +447,7 @@ def _roll_up_regions(patients: dict) -> None:
 def _run_ios(
     t1_root, t2_root, automation, registration_model, orientation_reference,
     ios_patch, mgl_landmarks_path, mgl_patch_height,
-    output_dir, work_dir, suffix, report,
+    output_dir, work_dir, suffix, report, sup=None,
 ) -> None:
     # Imported here rather than at module level: the IOS engine pulls in torch,
     # monai and pytorch3d, and AREG must load (and register CBCT scans) on a

@@ -5,37 +5,55 @@ everything around it runs for real, including the CBCT engine end to end
 against synthetic volumes -- elastix is fast enough on a 48^3 phantom that the
 registration itself is tested rather than mocked.
 
+The four tools AREG drives are stood in for by a fake supervisor, which is all
+a tool can see of them: five members, duck-typed, nothing imported across
+venvs.
+
 Each test that pins a fixed defect says which one in its docstring.
+
+    cd tools/AREG && uv run pytest
 """
 
 import json
 import os
-import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
 import SimpleITK as sitk
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..")))
-
-from base import ToolArgumentError  # noqa: E402
-from config import settings  # noqa: E402
-from tools.AREG.src import catalogs, pairing  # noqa: E402
-from tools.AREG.src import AREGLogic  # noqa: E402
+from sadt_areg import catalogs, dispatch, pairing, run, tools
+from sadt_areg.errors import SupervisorRequired, ToolInputError
 
 
-@pytest.fixture(autouse=True)
-def _scratch_under_tmp_path(tmp_path, monkeypatch):
-    """Point TEMP_DIR at this test's own directory.
+class FakeSup:
+    """A supervisor, as a tool sees one. Records what it was asked for.
 
-    `file_utils.make_scratch_dir` registers what it hands out with the REQUEST
-    being served, and main.py is what deletes it. A test calling `main()`
-    directly has no request, so nothing cleans up -- and the suite quietly
-    accumulated a scratch directory per call in the server's real TEMP_DIR,
-    which on a machine that also serves requests is the one place they must not
-    pile up.
+    `outputs` maps a tool name to a callable taking the parameters it was sent
+    and returning the directory it "produced", so a test can plant results
+    without any of the real tools existing.
     """
-    monkeypatch.setattr(settings, "TEMP_DIR", str(tmp_path / "scratch"))
+
+    def __init__(self, tmp_path, outputs=None):
+        self.out = Path(tmp_path) / "out"
+        self.tmp = Path(tmp_path) / "tmp"
+        self.tmp.mkdir(parents=True, exist_ok=True)
+        self.outputs = outputs or {}
+        self.calls = []
+        self.messages = []
+
+    def run(self, tool, **params):
+        self.calls.append((tool, params))
+        maker = self.outputs.get(tool)
+        if maker is None:
+            raise AssertionError(f"nothing planted for {tool!r} in this test")
+        return Path(maker(params))
+
+    def progress(self, fraction, message):
+        self.messages.append((fraction, message))
+
+    def log(self, message):
+        self.messages.append((None, message))
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +199,7 @@ class TestMaskDiscovery:
 # ---------------------------------------------------------------------------
 
 elastix = pytest.importorskip(
-    "tools.AREG.src.cbct.elastix", reason="the CBCT engine needs itk-elastix"
+    "sadt_areg.cbct.elastix", reason="the CBCT engine needs itk-elastix"
 )
 try:
     elastix.check_dependencies()
@@ -279,10 +297,13 @@ class TestElastix:
     def test_the_masked_image_never_reaches_the_disk(self, tmp_path, monkeypatch):
         """FIX: `MaskedImage` wrote `<temp>/fixed_image_masked.nii.gz` -- one
         FIXED name shared by every patient of a run and by every concurrent
-        request on this server."""
-        from config import settings
+        request being served.
 
-        monkeypatch.setattr(settings, "TEMP_DIR", str(tmp_path))
+        Run from an empty directory rather than by patching a setting: the
+        masked image is held in memory now, so there is no temp directory to
+        point anywhere, and "wrote nothing at all" is the stronger claim.
+        """
+        monkeypatch.chdir(tmp_path)
         fixed = _phantom(size=32)
         moving, _truth = _moved(fixed)
         masked, _note = elastix.apply_mask(fixed, _full_mask(fixed))
@@ -307,14 +328,14 @@ class TestSemiAutomatedCBCT:
 
     def test_a_run_writes_a_registered_scan_a_transform_and_a_report(self, tmp_path):
         self._cohort(tmp_path)
-        run = AREGLogic.register(
+        run = dispatch.register(
             t1_path=str(tmp_path / "T1"),
             t2_path=str(tmp_path / "T2"),
             t1_masks_path=str(tmp_path / "masks"),
             modality=catalogs.MODALITY_CBCT,
             automation=catalogs.AUTOMATION_SEMI,
             regions=["Cranial base"],
-            scratch_dir=str(tmp_path / "scratch"),
+            output_dir=str(tmp_path / "out"),
         )
         assert run.succeeded == ["P1"]
         produced = sorted(
@@ -344,14 +365,14 @@ class TestSemiAutomatedCBCT:
         a volume the caller never received.
         """
         self._cohort(tmp_path)
-        run = AREGLogic.register(
+        run = dispatch.register(
             t1_path=str(tmp_path / "T1"),
             t2_path=str(tmp_path / "T2"),
             t1_masks_path=str(tmp_path / "masks"),
             modality=catalogs.MODALITY_CBCT,
             automation=catalogs.AUTOMATION_SEMI,
             regions=["Cranial base"],
-            scratch_dir=str(tmp_path / "scratch"),
+            output_dir=str(tmp_path / "out"),
         )
         transform = sitk.ReadTransform(
             os.path.join(run.output_dir, "CB", "P1_CB_Reg_transform.tfm")
@@ -375,14 +396,14 @@ class TestSemiAutomatedCBCT:
         self._cohort(tmp_path, subjects=("P1", "P2"))
         os.remove(str(tmp_path / "masks" / "P2_T1_CB_seg.nii.gz"))
 
-        run = AREGLogic.register(
+        run = dispatch.register(
             t1_path=str(tmp_path / "T1"),
             t2_path=str(tmp_path / "T2"),
             t1_masks_path=str(tmp_path / "masks"),
             modality=catalogs.MODALITY_CBCT,
             automation=catalogs.AUTOMATION_SEMI,
             regions=["Cranial base"],
-            scratch_dir=str(tmp_path / "scratch"),
+            output_dir=str(tmp_path / "out"),
         )
         assert run.succeeded == ["P1"]
         failure = run.patients["P2"]["regions"]["CB"]
@@ -393,15 +414,15 @@ class TestSemiAutomatedCBCT:
         image = _phantom(size=16)
         _write(image, str(tmp_path / "T1" / "alpha_T1.nii.gz"))
         _write(image, str(tmp_path / "T2" / "beta_T2.nii.gz"))
-        with pytest.raises(ToolArgumentError, match="paired by name"):
-            AREGLogic.register(
+        with pytest.raises(ToolInputError, match="paired by name"):
+            dispatch.register(
                 t1_path=str(tmp_path / "T1"),
                 t2_path=str(tmp_path / "T2"),
                 t1_masks_path=str(tmp_path / "T1"),
                 modality=catalogs.MODALITY_CBCT,
                 automation=catalogs.AUTOMATION_SEMI,
                 regions=["Cranial base"],
-                scratch_dir=str(tmp_path / "scratch"),
+                output_dir=str(tmp_path / "out"),
             )
 
 
@@ -410,36 +431,44 @@ class TestSemiAutomatedCBCT:
 # ---------------------------------------------------------------------------
 
 class TestArgumentRules:
-    def _main(self, **overrides):
+    def _main(self, tmp_path=None, **overrides):
+        """Drive `main()` WITH a supervisor unless a test says otherwise.
+
+        Every server run has one, and these tests are about the argument rules
+        rather than about reaching the other tools -- without a supervisor the
+        structural refusal fires first and hides the rule under test. The
+        absent-supervisor case is `TestTheToolsItDrives`.
+        """
         arguments = {
             "modality": catalogs.MODALITY_CBCT,
             "automation": catalogs.AUTOMATION_SEMI,
             "t1": "/nonexistent/t1",
             "t2": "/nonexistent/t2",
+            "sup": FakeSup(tmp_path or "/tmp/areg-rules"),
         }
         arguments.update(overrides)
-        return AREGLogic.main(**arguments)
+        return dispatch.main(**arguments)
 
     def test_a_mode_a_modality_does_not_have_is_refused(self):
-        with pytest.raises(ToolArgumentError, match="not a mode IOS has"):
+        with pytest.raises(ToolInputError, match="not a mode IOS has"):
             self._main(
                 modality=catalogs.MODALITY_IOS, automation=catalogs.AUTOMATION_ORIENTED
             )
 
     def test_an_empty_region_selection_is_refused(self):
-        with pytest.raises(ToolArgumentError, match="at least one anatomical region"):
+        with pytest.raises(ToolInputError, match="at least one anatomical region"):
             self._main(cbct_regions={name: False for name in catalogs.REGION_CHOICES})
 
     def test_semi_automated_cbct_without_masks_is_refused(self):
-        with pytest.raises(ToolArgumentError, match="masks you provide"):
+        with pytest.raises(ToolInputError, match="masks you provide"):
             self._main()
 
     def test_the_oriented_mode_without_a_reference_is_refused(self):
-        with pytest.raises(ToolArgumentError, match="orientation reference"):
+        with pytest.raises(ToolInputError, match="orientation reference"):
             self._main(automation=catalogs.AUTOMATION_ORIENTED)
 
     def test_the_palate_patch_without_its_checkpoint_is_refused(self):
-        with pytest.raises(ToolArgumentError, match="patch-prediction checkpoint"):
+        with pytest.raises(ToolInputError, match="patch-prediction checkpoint"):
             self._main(modality=catalogs.MODALITY_IOS, automation=catalogs.AUTOMATION_SEMI)
 
     def test_the_mucogingival_patch_predicts_its_own_landmarks(self):
@@ -452,16 +481,14 @@ class TestArgumentRules:
                 automation=catalogs.AUTOMATION_SEMI,
                 ios_patch=catalogs.PATCH_MGL,
             )
-        assert not isinstance(raised.value, ToolArgumentError), str(raised.value)
+        assert not isinstance(raised.value, ToolInputError), str(raised.value)
 
-    def test_without_the_landmark_tool_it_asks_for_the_landmarks(self, monkeypatch):
+    def test_without_a_way_to_reach_the_landmark_tool_it_asks_for_the_landmarks(self):
         """A deployment may legitimately not carry ALI, and must then say which
         field to fill rather than fail from somewhere inside another tool."""
-        from tools.AREG.src import tools_client
-
-        monkeypatch.setattr(tools_client, "is_available", lambda name: False)
-        with pytest.raises(ToolArgumentError, match="mgl_landmarks"):
+        with pytest.raises(SupervisorRequired, match="mgl_landmarks"):
             self._main(
+                sup=None,
                 modality=catalogs.MODALITY_IOS,
                 automation=catalogs.AUTOMATION_SEMI,
                 ios_patch=catalogs.PATCH_MGL,
@@ -481,7 +508,7 @@ class TestArgumentRules:
         assert "checkpoint" not in str(raised.value)
 
     def test_a_negative_patch_height_is_refused(self):
-        with pytest.raises(ToolArgumentError, match="cannot be negative"):
+        with pytest.raises(ToolInputError, match="cannot be negative"):
             self._main(
                 modality=catalogs.MODALITY_IOS,
                 automation=catalogs.AUTOMATION_SEMI,
@@ -491,7 +518,7 @@ class TestArgumentRules:
             )
 
     def test_a_suffix_that_is_a_path_is_refused(self):
-        with pytest.raises(ToolArgumentError, match="name fragment"):
+        with pytest.raises(ToolInputError, match="name fragment"):
             self._main(t1_masks="/nonexistent/masks", output_suffix="../escape")
 
     def test_the_rules_run_before_anything_is_read(self):
@@ -507,7 +534,7 @@ class TestMaskLookup:
         discovered under it keys to `P1_seg_SegOut/P1` while its scan keys to
         `P1`. Without the leaf fallback every Fully-Automated run would report
         'no mask for this subject' for every subject."""
-        from tools.AREG.src.cbct import pipeline as cbct_pipeline
+        from sadt_areg.cbct import pipeline as cbct_pipeline
 
         image = _phantom(size=16)
         _write(
@@ -520,7 +547,7 @@ class TestMaskLookup:
     def test_an_ambiguous_leaf_is_not_guessed(self, tmp_path):
         """Two subjects genuinely called P1 in different folders must not
         borrow each other's mask."""
-        from tools.AREG.src.cbct import pipeline as cbct_pipeline
+        from sadt_areg.cbct import pipeline as cbct_pipeline
 
         image = _phantom(size=16)
         for site in ("siteA", "siteB"):
@@ -534,7 +561,7 @@ class TestCheckpointLookup:
         """A `server_selectable` name resolves to the hosted ENTRY, and the
         published AREG bundle is a folder -- so what reaches the predictor is a
         directory, not the .ckpt the network loads."""
-        from tools.AREG.src.ios import butterfly
+        from sadt_areg.ios import butterfly
 
         bundle = tmp_path / "AREG_model"
         (bundle / "nested").mkdir(parents=True)
@@ -542,86 +569,134 @@ class TestCheckpointLookup:
         assert butterfly.find_checkpoint(str(bundle)).endswith("patch.ckpt")
 
     def test_a_bundle_with_no_checkpoint_names_the_setup_script(self, tmp_path):
-        from tools.AREG.src.ios import butterfly
+        from sadt_areg.ios import butterfly
 
         (tmp_path / "empty").mkdir()
-        with pytest.raises(ToolArgumentError, match="setup-models.sh"):
+        with pytest.raises(ToolInputError, match="setup-models.sh"):
             butterfly.find_checkpoint(str(tmp_path / "empty"))
 
     def test_several_checkpoints_are_a_422_naming_them(self, tmp_path):
         """Which weights registered a patient must never be a surprise."""
-        from tools.AREG.src.ios import butterfly
+        from sadt_areg.ios import butterfly
 
         bundle = tmp_path / "two"
         bundle.mkdir()
         (bundle / "a.ckpt").write_text("x")
         (bundle / "b.ckpt").write_text("x")
-        with pytest.raises(ToolArgumentError, match="a.ckpt, b.ckpt"):
+        with pytest.raises(ToolInputError, match="a.ckpt, b.ckpt"):
             butterfly.find_checkpoint(str(bundle))
 
 
-class TestHelperToolAvailability:
-    def test_a_missing_helper_tool_names_the_mode_that_needs_it(self, monkeypatch):
-        from tools.AREG.src import tools_client
+class TestTheToolsItDrives:
+    """The seam is a contract, and a rename on the other side of one is exactly
+    the kind of drift nothing else would catch."""
 
-        monkeypatch.setattr(tools_client, "is_available", lambda name: False)
-        with pytest.raises(ToolArgumentError) as raised:
-            tools_client.require("AMASSS", "Fully-Automated CBCT registration")
+    def test_a_mode_needing_a_tool_says_so_when_there_is_no_supervisor(self):
+        """Nothing about the request is wrong -- there is simply no way to reach
+        the other tool. So the message names the mode that DOES work rather than
+        an argument to change, because "deploy a tool" is not something the
+        person who sent the request can act on."""
+        with pytest.raises(SupervisorRequired) as raised:
+            tools.require(None, "AMASSS", "Fully-Automated CBCT registration")
+
         message = str(raised.value)
         assert "Fully-Automated CBCT registration" in message
-        assert "Semi-Automated" in message  # the mode that does work
+        assert "AMASSS" in message
+        assert "Semi-Automated" in message   # the mode that does work
+        assert "t1_masks" in message         # and the argument that carries it
 
-    def test_the_deployed_tools_are_what_the_automated_modes_expect(self):
-        """The seams are contracts, and a rename on the other side of one is
-        exactly the kind of drift nothing else would catch."""
-        from registry import TOOLS
+    def test_a_supervisor_makes_the_same_mode_acceptable(self):
+        assert tools.require(FakeSup("/tmp"), "AMASSS", "anything") is None
 
-        assert set(TOOLS["AMASSS"].arguments) >= {"input", "model", "structures", "merge"}
-        assert set(TOOLS["ASO"].arguments) >= {"modality", "automation", "input", "reference"}
-        assert set(TOOLS["CrownSeg"].arguments) >= {"input", "suffix"}
-        assert set(TOOLS["ALI"].arguments) >= {"input", "ios_networks", "prediction_ID"}
+    def test_the_mask_request_names_amasss_arguments(self, tmp_path):
+        """AREG sends structure CODES. The packaged AMASSS publishes codes as its
+        `choices`, so the display-name translation the in-process version needed
+        is gone rather than restated -- and this is what says so."""
+        planted = tmp_path / "masks"
+        planted.mkdir()
+        sup = FakeSup(tmp_path, {"AMASSS": lambda params: planted})
 
-    def test_the_landmark_request_ali_receives_passes_its_own_validation(self):
-        """AREG asks ALI for the mucogingival network by its DISPLAY name, and
-        as the complete selection -- a multichoice is read as everything it
-        mentions and nothing else, so the crown networks stay off and the run
-        does not pay for two extra passes over every mesh."""
-        from registry import TOOLS
-        from tools.AREG.src import tools_client
+        tools.segment_masks(sup, str(tmp_path / "t1"), "/models/AMASSS", ["CBMASK"])
 
-        selection = {tools_client._ali_network_named("ALI", "MG"): True}
-        cleaned = TOOLS["ALI"].validate(
-            {"input": "/tmp/meshes", "ios_networks": selection, "prediction_ID": "MG_Pred"}
-        )
-        assert cleaned["ios_networks"].selected == ("Mucogingival",)
+        tool, params = sup.calls[0]
+        assert tool == "AMASSS"
+        assert params["structures"] == ["CBMASK"]
+        # One binary file per structure: `find_masks` looks each region up by
+        # name, and a merged multi-label volume makes every region resolve to
+        # the same file.
+        assert params["merge"] == ["SEPARATE"]
+        assert params["generate_surface"] is False
+        assert set(params) >= {"scans", "model", "output_dir"}
 
-    def test_the_mask_request_amasss_receives_passes_its_own_validation(self):
-        """The wire carries AMASSS's DISPLAY names, and `validate()` rejects
-        anything else with a 422 before `run()` is reached -- so sending a code
-        (or a guessed label like "Separated") fails after the T1 folder has
-        already been extracted. Every option AREG sends is looked up in AMASSS's
-        own tables; this asserts the lookup and the validation agree."""
-        from registry import TOOLS
-        from tools.AREG.src import catalogs, tools_client
+    def test_the_landmark_request_asks_for_mucogingival_alone(self, tmp_path):
+        """Alone, because it is the one network ALI leaves off by default and
+        the crown networks would each cost another pass over every mesh."""
+        planted = tmp_path / "mg"
+        planted.mkdir()
+        sup = FakeSup(tmp_path, {"ALI": lambda params: planted})
 
-        structures = {
-            tools_client._option_named("AMASSS", "structures", code): True
-            for code in catalogs.REGION_MASK_STRUCTURES.values()
+        tools.predict_mucogingival(sup, str(tmp_path / "meshes"))
+
+        tool, params = sup.calls[0]
+        assert tool == "ALI"
+        assert params["ios_networks"] == ["Mucogingival"]
+        assert params["prediction_ID"] == "MG_Pred"
+        # Not named, so ALI picks the bundle matching the input itself.
+        assert "model" not in params
+
+    def test_the_orientation_request_is_the_nested_one(self, tmp_path):
+        """ASO is itself supervised for CBCT, so this is AREG -> ASO -> ALI:
+        three tools and three venvs deep. Whatever supplies `sup` supplies the
+        callee's too; nothing here arranges that."""
+        planted = tmp_path / "oriented"
+        planted.mkdir()
+        sup = FakeSup(tmp_path, {"ASO": lambda params: planted})
+
+        tools.orient_scans(sup, str(tmp_path / "scans"), "/models/gold", "CBCT")
+
+        tool, params = sup.calls[0]
+        assert tool == "ASO"
+        assert params["automation"] == "Fully-Automated"
+        assert params["modality"] == "CBCT"
+        assert params["output_suffix"] == "Or"
+
+    def test_every_tool_is_named_by_string(self):
+        """`sup.run("ASO", ...)`, never `sup.ASO(...)`. A typo in a string is
+        greppable and tools.py is the whole call graph; a typo in an attribute
+        is an AttributeError an hour into a job."""
+        source = open(tools.__file__, encoding="utf-8").read()
+        assert 'sup.run("' in source
+        for tool in ("AMASSS", "ASO", "Crown_Seg", "ALI"):
+            assert f'"{tool}"' in source, tool
+
+    @pytest.mark.skipif(
+        not all(__import__("sadt_testkit").is_built(t)
+                for t in ("AMASSS", "ASO", "Crown_Seg", "ALI")),
+        reason="run `uv sync` in the four tools AREG drives",
+    )
+    def test_the_arguments_it_sends_are_the_arguments_they_publish(self):
+        """Against the REAL schemas, out of process. This is the test that
+        catches a sibling renaming an argument -- the failure would otherwise
+        land an hour into a chain, inside another tool."""
+        from sadt_testkit import tool_schema
+
+        assert set(tool_schema("AMASSS")["arguments"]) >= {
+            "scans", "model", "output_dir", "structures", "merge",
+            "prediction_ID", "generate_surface",
         }
-        merge = {tools_client._option_named("AMASSS", "merge", "SEPARATE"): True}
-
-        cleaned = TOOLS["AMASSS"].validate(
-            {
-                "input": "/tmp/scans",
-                "model": "/tmp/bundle",
-                "structures": structures,
-                "merge": merge,
-                "prediction_ID": "seg",
-                "generate_surface": False,
-            }
-        )
-        assert sorted(cleaned["structures"].selected) == sorted(structures)
-        assert cleaned["merge"].selected == tuple(merge)
+        assert set(tool_schema("ASO")["arguments"]) >= {
+            "input", "reference", "output_dir", "modality", "automation",
+            "output_suffix",
+        }
+        assert set(tool_schema("Crown_Seg")["arguments"]) >= {
+            "meshes", "output_dir", "suffix", "model",
+        }
+        ali = tool_schema("ALI")
+        assert set(ali["arguments"]) >= {
+            "input", "model", "output_dir", "ios_networks", "prediction_ID",
+        }
+        # And the network AREG asks for by name is one ALI actually offers.
+        assert "Mucogingival" in ali["arguments"]["ios_networks"]["choices"]
 
 
 # ---------------------------------------------------------------------------
@@ -630,10 +705,10 @@ class TestHelperToolAvailability:
 
 vtk = pytest.importorskip("vtk", reason="the IOS engine needs VTK")
 
-from tools.AREG.src import landmarks as landmark_files  # noqa: E402
-from tools.AREG.src.ios import butterfly as butterfly_module  # noqa: E402
-from tools.AREG.src.ios import icp, mgl, orientation, postprocess, surfaces  # noqa: E402
-from tools.AREG.src.ios import pipeline as ios_pipeline  # noqa: E402
+from sadt_areg import landmarks as landmark_files  # noqa: E402
+from sadt_areg.ios import butterfly as butterfly_module  # noqa: E402
+from sadt_areg.ios import icp, mgl, orientation, postprocess, surfaces  # noqa: E402
+from sadt_areg.ios import pipeline as ios_pipeline  # noqa: E402
 
 
 def _grid_mesh(rows=12, columns=12, spacing=1.0):
@@ -1141,7 +1216,7 @@ class TestIOSTransform:
 
 class TestPatchCloud:
     def test_a_patch_selecting_nothing_says_so(self):
-        from tools.AREG.src.ios import butterfly
+        from sadt_areg.ios import butterfly
         from vtk.util.numpy_support import numpy_to_vtk
 
         mesh = _grid_mesh()
@@ -1154,7 +1229,7 @@ class TestPatchCloud:
             butterfly.patch_cloud(mesh)
 
     def test_the_cloud_holds_exactly_the_patch_points(self):
-        from tools.AREG.src.ios import butterfly
+        from sadt_areg.ios import butterfly
         from vtk.util.numpy_support import numpy_to_vtk
 
         mesh = _grid_mesh()
