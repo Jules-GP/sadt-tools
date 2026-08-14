@@ -55,7 +55,13 @@ def run(
             "LL2R", "LR2R", "UR3OIP", "UL3OIP", "UR3RIP", "UL3RIP",
         ]
     ] = [],
-    ios_networks: list[Literal["Occlusal", "Cervical"]] = ["Occlusal", "Cervical"],
+    # Mucogingival is OFF by default: it is one point per lower tooth on the
+    # gingival margin, wanted by a mandible registration and by nobody asking
+    # for crown landmarks. On by default would add a third pass over every mesh
+    # of every existing request.
+    ios_networks: list[
+        Literal["Occlusal", "Cervical", "Mucogingival"]
+    ] = ["Occlusal", "Cervical"],
     prediction_ID: str = "Pred",
     device: Literal["cuda", "cpu"] = "cuda",
     search_seconds: float = 0.0,
@@ -88,7 +94,11 @@ def run(
             it needs instead of running 58 agents to use them.
         ios_networks: IOS only. Occlusal predicts the occlusal point and the
             mesio- and disto-buccal cusps; Cervical predicts the cervical
-            lingual and buccal points.
+            lingual and buccal points; Mucogingival predicts one point per lower
+            tooth on the gingival margin rather than on the crown, and runs on
+            the mandible only. A point it had to place from a fit of the arch,
+            rather than from the render, carries a caveat in its own
+            `description` field and in `landmarks_degraded` in the report.
         prediction_ID: Suffix used in output names, e.g. `scan_lm_Pred.mrk.json`.
         device: "cuda" or "cpu". CUDA falls back to CPU when no card is
             visible, with a warning.
