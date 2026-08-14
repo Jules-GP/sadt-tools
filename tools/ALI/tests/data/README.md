@@ -30,14 +30,26 @@ run.
 
 ## Running the real-model tests
 
+Both are pointed at their data by environment variable, so nothing here has to
+know where a deployment stages it:
+
 ```bash
 # CBCT: the agent actually walks a volume. Needs a card.
+SADT_ALI_CBCT_MODELS=/path/to/DATA/ALI/models/ALI_CBCT_Models \
+SADT_ALI_SCAN=/path/to/DATA/ALI/testfiles/MG_test_scan.nii.gz \
 uv run pytest -m "gpu and models"
 ```
 
+| Variable | What |
+|---|---|
+| `SADT_ALI_CBCT_MODELS` | the CBCT bundle |
+| `SADT_ALI_SCAN` | one real CBCT volume |
+| `SADT_ALI_IOS_MODELS` | the IOS bundle |
+| `SADT_ALI_MESH` | one **segmented** intra-oral mesh |
+
 The IOS half additionally needs the `ios` extra, which compiles pytorch3d from
-source (see README.md), and the Crown_Seg chain test needs that tool built with
-*its* `segmentation` extra:
+source and therefore a CUDA toolkit — `nvcc`, not just a driver. The Crown_Seg
+chain test needs that tool built with *its* `segmentation` extra:
 
 ```bash
 uv sync --extra ios                       # compiles pytorch3d, needs nvcc

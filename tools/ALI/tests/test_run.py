@@ -974,3 +974,99 @@ def test_only_the_named_landmarks_run(tmp_path, stub_agent, cbct_environment):
     assert "C2" not in report["landmarks_requested"]
     # And the report says the selection came from `landmarks`, not the regions.
     assert report["regions"] == []
+
+
+# ---------------------------------------------------------------------------
+# The real bundle, on the real card
+# ---------------------------------------------------------------------------
+
+REAL_CBCT_MODELS = os.environ.get("SADT_ALI_CBCT_MODELS")
+REAL_IOS_MODELS = os.environ.get("SADT_ALI_IOS_MODELS")
+REAL_SCAN = os.environ.get("SADT_ALI_SCAN")
+REAL_MESH = os.environ.get("SADT_ALI_MESH")
+
+
+@pytest.mark.gpu
+@pytest.mark.models
+@pytest.mark.skipif(
+    not (REAL_CBCT_MODELS and REAL_SCAN),
+    reason="set SADT_ALI_CBCT_MODELS and SADT_ALI_SCAN (see tests/data/README.md)",
+)
+def test_the_real_cbct_bundle_places_landmarks_on_a_real_scan(tmp_path):
+    """The shipped bundle on a real CBCT, on the GPU.
+
+    Positions are compared against the pre-port implementation separately (see
+    README, "Validated against"); what this asserts is that the real bundle's
+    layout, the real scan geometry and the agent's two-scale walk all survive
+    the repackaging.
+
+    The seven landmarks are the ones ASO registers on, which is what makes this
+    the cheapest run that still covers the path another tool depends on.
+    """
+    from pathlib import Path
+
+    wanted = ["Ba", "S", "N", "RPo", "LPo", "ROr", "LOr"]
+    output = run(
+        input=Path(REAL_SCAN),
+        model=Path(REAL_CBCT_MODELS),
+        output_dir=tmp_path / "out",
+        landmarks=wanted,
+        device="cuda",
+    )
+
+    report = json.loads((output / dispatch.REPORT_NAME).read_text())
+    assert report["mode"] == "CBCT"
+    assert report["device"].startswith("cuda")
+    assert report["summary"] == {"total": 1, "processed": 1, "failed": 0}
+    # Named landmarks replace the regions, so exactly these were run.
+    assert set(report["landmarks_requested"]) == set(wanted)
+    assert report["regions"] == []
+
+    produced = sorted(output.rglob("*.mrk.json"))
+    assert len(produced) == 1
+    points = json.loads(produced[0].read_text())["markups"][0]["controlPoints"]
+    found = {point["label"]: point["position"] for point in points}
+    assert set(found) == set(wanted), report["scans"]
+
+    # Inside the scan's own physical extent, which is the cheap check that
+    # catches a coordinate convention going wrong -- the failure mode that
+    # leaves a perfectly valid file placing every point outside the head.
+    import SimpleITK as sitk
+
+    image = sitk.ReadImage(str(REAL_SCAN))
+    corners = [
+        image.TransformIndexToPhysicalPoint((x, y, z))
+        for x in (0, image.GetSize()[0] - 1)
+        for y in (0, image.GetSize()[1] - 1)
+        for z in (0, image.GetSize()[2] - 1)
+    ]
+    low = [min(c[axis] for c in corners) for axis in range(3)]
+    high = [max(c[axis] for c in corners) for axis in range(3)]
+    for label, position in found.items():
+        for axis in range(3):
+            assert low[axis] <= position[axis] <= high[axis], (label, axis, position)
+
+
+@pytest.mark.gpu
+@pytest.mark.models
+@pytest.mark.ios
+@pytest.mark.skipif(
+    not (REAL_IOS_MODELS and REAL_MESH),
+    reason="set SADT_ALI_IOS_MODELS and SADT_ALI_MESH, and `uv sync --extra ios`",
+)
+def test_the_real_ios_bundle_places_landmarks_on_a_real_mesh(tmp_path):
+    """The IOS half, which needs pytorch3d compiled -- see README."""
+    from pathlib import Path
+
+    output = run(
+        input=Path(REAL_MESH),
+        model=Path(REAL_IOS_MODELS),
+        output_dir=tmp_path / "out",
+        ios_networks=["Occlusal"],
+        device="cuda",
+    )
+
+    report = json.loads((output / dispatch.REPORT_NAME).read_text())
+    assert report["mode"] == "IOS"
+    assert report["summary"]["processed"] == 1
+    assert sorted(output.rglob("*.mrk.json"))

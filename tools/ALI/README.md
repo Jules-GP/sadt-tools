@@ -205,12 +205,44 @@ deduplicating that across tools at build time.
   naming, tree preservation, the run report, work-directory cleanup, the
   output-containment rule and every cross-argument rule run for real, with no
   checkpoint and no card.
-- **Not yet validated against reference output.** No GPU run has been made:
-  this workstation has no CUDA device, and the CBCT bundle (4.7 GB) and IOS
-  bundle are not staged here. **The `gpu`/`models` tests have not been run**,
-  and neither has a comparison against the pre-port implementation — which is
-  what AMASSS, Batch_Dental_Seg and Surg_Mov_Pred each have and this does not.
-  Everything needed to do it is in `tests/data/README.md`.
+- **Weight discovery, against the real 14 GB bundle**: `discover_weights` finds
+  **119 landmarks carrying both scales** — exactly the 119 this package's
+  catalog declares, with nothing left ungrouped, so the bundle's folder names
+  and the vocabulary agree completely. The IOS bundle resolves all four
+  (network, jaw) pairs and reports `Lower_MG_v6.pth` as unrecognised, which is
+  the naming rule doing its job.
+- **Against the pre-port implementation: bit-identical.**
+  - **Input**: `DATA/ALI/testfiles/MG_test_scan.nii.gz`, one real CBCT.
+  - **Weights**: `DATA/ALI/models/ALI_CBCT_Models`, the seven landmarks ASO
+    registers on (`Ba`, `S`, `N`, `RPo`, `LPo`, `ROr`, `LOr`) — the set that
+    matters most, since another tool depends on it.
+  - **Reference**: `slicer-remote-tool-server`'s `tools/ALI/`, verified
+    byte-identical to the revision this repository imported, run **inside this
+    package's own venv** with the four server modules stubbed. So torch
+    2.8.0+cu128, monai 1.6.0, itk 5.4.7, the weights and the card are the same
+    on both sides and the *only* variable is the code.
+  - **Result**: each implementation run twice, all 16 port×reference pairs
+    compared. **Every landmark matches to the full float, 0.0000 mm.** The
+    reference's own run-to-run spread is also 0.0000 mm, so this pipeline is
+    deterministic and "identical" means identical, not "within the noise".
+
+    | | Max | Mean | Exact |
+    |---|---|---|---|
+    | reference vs reference | 0.0000 mm | 0.0000 mm | 7/7 |
+    | port vs port | 0.0000 mm | 0.0000 mm | 7/7 |
+    | port vs reference (×4) | 0.0000 mm | 0.0000 mm | 7/7 |
+
+  - **Tolerance**: none needed. **Treat any non-zero difference as a
+    regression** — unlike AMASSS, where nnUNet's CUDA nondeterminism sets a
+    noise floor, nothing here is nondeterministic on a scan whose agents
+    converge without leaving the volume.
+- **GPU tests were run**: `uv run pytest -m "gpu and models"` on an RTX 6000 Ada
+  — passed in 38 s, all seven landmarks found, `device=cuda`, every point inside
+  the scan's own physical extent.
+- **The IOS half is still unvalidated.** It needs pytorch3d, which is compiled
+  from source and therefore needs a CUDA toolkit; this machine has the driver
+  but no `nvcc`, so `uv sync --extra ios` cannot run here. Its test exists and
+  is marked `ios`. The same wall Crown_Seg hit.
 
 ## Working on it
 
@@ -218,7 +250,7 @@ deduplicating that across tools at build time.
 cd tools/ALI
 uv sync                    # ~8.8 GB, CUDA wheels, no pytorch3d
 uv run pytest -m "not gpu" # 57 tests, no GPU and no checkpoints needed
-uv sync --extra ios        # compiles pytorch3d, needs nvcc
+uv sync --extra ios        # compiles pytorch3d, needs nvcc (not just a driver)
 uv run pytest -m models    # the real bundles, see tests/data/README.md
 ```
 
