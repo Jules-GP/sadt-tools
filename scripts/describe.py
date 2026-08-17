@@ -79,7 +79,7 @@ SUPERVISOR = "sup"
 # a layout module may only ever DERIVE from the tool's own catalogs, never
 # restate them; `layout_for` below refuses anything that names an argument or
 # an option the signature does not publish, which is what makes that hold.
-LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "label", "hidden")
+LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label", "hidden")
 
 LAYOUT_MODULE = "layout"
 

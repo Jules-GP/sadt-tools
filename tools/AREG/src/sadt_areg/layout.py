@@ -56,7 +56,20 @@ LAYOUT = {
     "t1": {"section": _INPUTS, "label": "T1 (baseline)"},
     "t2": {"section": _INPUTS, "label": "T2 (follow-up)"},
     "modality": {"section": _INPUTS, "label": "Input Type"},
-    "automation": {"section": _INPUTS, "label": "Mode"},
+    # IOS has no "Oriented + Fully-Automated": there is nothing to orient the
+    # meshes onto before registering. Offering it and refusing the run at the
+    # end is the worst of both, so the option is not offered at all -- the
+    # table is catalogs', so a mode added there needs no edit here.
+    "automation": {
+        "section": _INPUTS,
+        "label": "Mode",
+        "options_when": {
+            "modality": {
+                modality: list(modes)
+                for modality, modes in catalogs.AUTOMATION_BY_MODALITY.items()
+            }
+        },
+    },
 
     # -- CBCT ---------------------------------------------------------------
     # The one argument a clinician must actually think about: register on what
