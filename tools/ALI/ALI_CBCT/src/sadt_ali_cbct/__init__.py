@@ -1,0 +1,97 @@
+"""ALI_CBCT -- Automatic Landmark Identification on CBCT volumes.
+
+One deep-RL agent per landmark walks the volume at 1 mm and then at 0.3 mm
+until it converges on the point. Writes one Slicer markups file per scan.
+
+Split out of the former single `ALI` tool, which chose between this engine and
+the intraoral one from the data. The two shared nothing but their output
+format and their input vocabulary -- both now in `sadt_ali_common` -- while
+being forced to share a virtualenv, and therefore a torch version. The
+intraoral engine needs torch 2.11 for pytorch3d; this one has no reason to
+move. That is what the split buys.
+"""
+
+from pathlib import Path
+from typing import Literal
+
+from .dispatch import identify
+
+
+def run(
+    input: Path,
+    model: Path,
+    output_dir: Path,
+    # Spelled out because `Literal` takes literals only -- it cannot be built
+    # from catalog.REGION_NAMES. That makes this a second declaration of the
+    # same set, which is the thing this contract otherwise avoids, so a test
+    # asserts the two agree.
+    regions: list[
+        Literal["Cranial base", "Upper", "Lower", "Impacted canine"]
+    ] = ["Cranial base", "Upper", "Lower", "Impacted canine"],
+    landmarks: list[
+        Literal[
+            "Ba", "S", "N", "RPo", "LPo", "RFZyg", "LFZyg", "C2", "C3", "C4", "RInfOr",
+            "LInfOr", "LMZyg", "RPF", "LPF", "PNS", "ANS", "A", "UR3O", "UR1O", "UL3O",
+            "UR6DB", "UR6MB", "UL6MB", "UL6DB", "IF", "ROr", "LOr", "RMZyg", "RNC",
+            "LNC", "UR7O", "UR5O", "UR4O", "UR2O", "UL1O", "UL2O", "UL4O", "UL5O",
+            "UL7O", "UL7R", "UL5R", "UL4R", "UL2R", "UL1R", "UR2R", "UR4R", "UR5R",
+            "UR7R", "UR6MP", "UL6MP", "UL6R", "UR6R", "UR6O", "UL6O", "UL3R", "UR3R",
+            "UR1R", "RCo", "RGo", "Me", "Gn", "Pog", "PogL", "B", "LGo", "LCo", "LR1O",
+            "LL6MB", "LL6DB", "LR6MB", "LR6DB", "LAF", "LAE", "RAF", "RAE", "LMCo",
+            "LLCo", "RMCo", "RLCo", "RMeF", "LMeF", "RSig", "RPRa", "RARa", "LSig",
+            "LARa", "LPRa", "LR7R", "LR5R", "LR4R", "LR3R", "LL3R", "LL4R", "LL5R",
+            "LL7R", "LL7O", "LL5O", "LL4O", "LL3O", "LL2O", "LL1O", "LR2O", "LR3O",
+            "LR4O", "LR5O", "LR7O", "LL6R", "LR6R", "LL6O", "LR6O", "LR1R", "LL1R",
+            "LL2R", "LR2R", "UR3OIP", "UL3OIP", "UR3RIP", "UL3RIP",
+        ]
+    ] = [],
+    prediction_ID: str = "Pred",
+    device: Literal["cuda", "cpu"] = "cuda",
+    search_seconds: float = 0.0,
+) -> Path:
+    """Place anatomical landmarks on a CBCT scan.
+
+    Args:
+        input: One CBCT scan (.nii/.nii.gz/.nrrd/.nrrd.gz/.gipl/.gipl.gz), or a
+            folder of them for a batch. Folders are searched recursively, and a
+            DICOM series found inside one is converted automatically. An input
+            holding intraoral surfaces is refused by name rather than half
+            processed -- run ALI_IOS on those.
+        model: The model bundle, holding `<landmark>/<scale>/*.pth` folders.
+        output_dir: Where results are written -- one `<scan>_lm_<ID>.mrk.json`
+            per scan, mirroring the input's own folder tree, plus
+            `run_report.json`. Nothing is written outside it.
+        regions: Anatomical regions to predict. Every region is on by default:
+            a landmark whose weights the bundle lacks costs a line in the run
+            report, whereas a region left off by default is one nobody finds.
+        landmarks: Predict exactly these landmarks. Leaving it empty is the
+            ordinary case and hands the choice to `regions`; naming any
+            landmark here REPLACES the region selection rather than narrowing
+            it, which is what lets a caller ask for the seven points it needs
+            instead of running 58 agents to use them.
+        prediction_ID: Suffix used in output names, e.g. `scan_lm_Pred.mrk.json`.
+        device: "cuda" or "cpu". CUDA falls back to CPU when no card is
+            visible, with a warning.
+        search_seconds: Seconds one agent may spend looking for its landmark
+            before it is reported as not found. 0 uses the default for the
+            device in use -- 15 s on CUDA, 60 s on CPU -- since there is no
+            nullable type in the schema to express "unset" with.
+
+    Returns:
+        The output directory, holding the markups files and the run report.
+    """
+    # torch, monai, itk and SimpleITK are all imported inside the engine: CI
+    # imports this module on every PR to publish the schema, and that must not
+    # cost a CUDA stack.
+    output_dir = Path(output_dir)
+    identify(
+        input_path=str(input),
+        model_path=str(model),
+        output_dir=str(output_dir),
+        cbct_regions=regions,
+        landmarks=landmarks,
+        prediction_ID=prediction_ID,
+        device=device,
+        search_seconds=search_seconds,
+    )
+    return output_dir

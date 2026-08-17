@@ -20,7 +20,7 @@ import math
 
 import numpy as np
 
-from ..errors import ToolUnavailableError
+from .errors import ToolUnavailableError
 
 _INSTALL_HINT = (
     "ALI's IOS engine needs pytorch3d, which publishes no usable wheel and is "
@@ -174,7 +174,7 @@ def arch_tangent(labels, vertices, tooth_number: int, device):
     missing and a one-sided difference is used. Returns None when neither
     neighbour is present -- the caller then falls back to the radial direction.
     """
-    from ..cbct.brain import import_torch
+    from .brain import import_torch
 
     torch = import_torch()
 
@@ -208,7 +208,7 @@ def mg_frame(vertices, center, tangent, tooth_number: int, device):
     aim point is where the landmark is expected (`MG_AIM_OFFSET`), so the
     cameras frame the gingival margin rather than the crown.
     """
-    from ..cbct.brain import import_torch
+    from .brain import import_torch
 
     from . import catalog
 
@@ -248,7 +248,7 @@ def mg_camera_directions(normal, device):
     the training code: the network sees three images in a fixed order and a
     different geometry is a different input.
     """
-    from ..cbct.brain import import_torch
+    from .brain import import_torch
 
     torch = import_torch()
 
@@ -275,7 +275,7 @@ def render_mg_views(renderer, mesh, aim, directions, radius: float, device):
     camera is baked into the meshes it is handed; here the cameras differ per
     view, so the pairing has to be explicit.
     """
-    from ..cbct.brain import import_torch
+    from .brain import import_torch
 
     torch = import_torch()
     p3d = import_pytorch3d()
@@ -319,7 +319,7 @@ def estimate_missing_teeth(labels, vertices, wanted, device) -> dict:
     extrapolation is not trustworthy and `{}` is returned -- the caller then
     skips those teeth, which is what happened to all of them before.
     """
-    from ..cbct.brain import import_torch
+    from .brain import import_torch
 
     torch = import_torch()
 
@@ -359,7 +359,7 @@ def render_views(renderer, mesh, center, radius: float, camera_positions, device
     each rendered pixel came from, which is how a predicted mask gets back
     onto the mesh.
     """
-    from ..cbct.brain import import_torch
+    from .brain import import_torch
 
     torch = import_torch()
     p3d = import_pytorch3d()

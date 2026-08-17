@@ -23,9 +23,9 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from sadt_ali import dispatch, markups, run
-from sadt_ali.cbct import catalog as cbct_catalog
-from sadt_ali.errors import ToolInputError, ToolUnavailableError
+from sadt_ali_cbct import dispatch, markups, run
+from sadt_ali_cbct import catalog as cbct_catalog
+from sadt_ali_cbct.errors import ToolInputError, ToolUnavailableError
 from sadt_ali.ios import catalog as ios_catalog
 from sadt_ali.ios import engine as ios_engine
 
@@ -106,8 +106,8 @@ def stub_agent(monkeypatch):
     Every landmark whose name starts with "X" is reported as not found, so the
     report's two failure kinds can be told apart in a test.
     """
-    from sadt_ali.cbct import agent as agent_module
-    from sadt_ali.cbct import engine as cbct_engine
+    from sadt_ali_cbct import agent as agent_module
+    from sadt_ali_cbct import engine as cbct_engine
 
     class StubBrain:
         def __init__(self, scale_keys, device, out_channels=6):
@@ -335,7 +335,7 @@ def test_the_working_directory_is_not_rediscovered_as_input(tmp_path):
 def test_a_folder_of_dicom_is_not_mistaken_for_an_empty_input(tmp_path, monkeypatch):
     """DICOM slices carry no extension, so only GDCM can recognize them --
     which is why the client offers a folder picker and why detection probes."""
-    from sadt_ali.cbct import preprocess
+    from sadt_ali_cbct import preprocess
 
     series = tmp_path / "cohort" / "patient01"
     series.mkdir(parents=True)
@@ -360,7 +360,7 @@ def test_a_folder_of_dicom_is_not_mistaken_for_an_empty_input(tmp_path, monkeypa
 
 
 def test_a_folder_already_holding_volumes_is_not_probed_for_dicom(tmp_path, monkeypatch):
-    from sadt_ali.cbct import preprocess
+    from sadt_ali_cbct import preprocess
 
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
     probed = []
@@ -377,7 +377,7 @@ def test_a_folder_already_holding_volumes_is_not_probed_for_dicom(tmp_path, monk
 # ---------------------------------------------------------------------------
 
 def test_weight_discovery_reads_the_folder_tree(tmp_path):
-    from sadt_ali.cbct import engine as cbct_engine
+    from sadt_ali_cbct import engine as cbct_engine
 
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba", "S"]})
     weights = cbct_engine.discover_weights(bundle)
@@ -389,7 +389,7 @@ def test_weight_discovery_reads_the_folder_tree(tmp_path):
 def test_a_landmark_missing_one_scale_is_not_offered(tmp_path):
     """Half a bundle must be reported up front, not fail mid-run: the agent
     walks the coarse scale and then the fine one, and needs both."""
-    from sadt_ali.cbct import engine as cbct_engine
+    from sadt_ali_cbct import engine as cbct_engine
 
     folder = tmp_path / "bundle" / "Ba" / "1"
     folder.mkdir(parents=True)
@@ -399,7 +399,7 @@ def test_a_landmark_missing_one_scale_is_not_offered(tmp_path):
 
 
 def test_requested_landmarks_separates_missing_from_unknown(tmp_path):
-    from sadt_ali.cbct import engine as cbct_engine
+    from sadt_ali_cbct import engine as cbct_engine
 
     weights = {"Ba": {}, "S": {}, "Mystery": {}}
     runnable, without_model, ungrouped = cbct_engine.requested_landmarks(weights, ["CB"])
@@ -414,7 +414,7 @@ def test_requested_landmarks_separates_missing_from_unknown(tmp_path):
 
 
 def test_a_bundle_using_the_ui_spelling_resolves(tmp_path):
-    from sadt_ali.cbct import engine as cbct_engine
+    from sadt_ali_cbct import engine as cbct_engine
 
     bundle = write_cbct_bundle(tmp_path / "bundle", {"Canine": ["UR3OI"]})
     weights = cbct_engine.discover_weights(bundle)
@@ -428,7 +428,7 @@ def test_a_bundle_using_the_ui_spelling_resolves(tmp_path):
 def test_a_bundle_of_the_wrong_kind_is_an_input_error(tmp_path, cbct_environment):
     """Naming the IOS bundle for a CBCT run (or vice versa) has to answer with
     a message the client shows verbatim, not a stack trace in a log."""
-    from sadt_ali.cbct import engine as cbct_engine
+    from sadt_ali_cbct import engine as cbct_engine
 
     ios_bundle = write_ios_bundle(tmp_path / "ios", ["Upper_O_model.pth"])
     with pytest.raises(ToolInputError, match="No CBCT landmark weights"):
@@ -772,7 +772,7 @@ def test_prediction_id_reaches_the_file_names(tmp_path, stub_agent, cbct_environ
 def test_the_search_budget_defaults_per_device():
     """0 means "not specified": there is no nullable type in the schema, so the
     argument cannot default to None the way the setting it replaces did."""
-    from sadt_ali.cbct import engine as cbct_engine
+    from sadt_ali_cbct import engine as cbct_engine
 
     assert cbct_engine.search_budget("cuda", 0.0) == 15.0
     # CPU inference needs several times longer to reach the same place.
@@ -790,8 +790,8 @@ def test_a_missing_dependency_fails_before_any_scan_is_touched(tmp_path, monkeyp
     "produced no landmarks for any scan", which buried the one line saying what
     to install. It is a property of the venv; it has to be raised once, before
     the loop."""
-    from sadt_ali.cbct import engine as cbct_engine
-    from sadt_ali.cbct import preprocess
+    from sadt_ali_cbct import engine as cbct_engine
+    from sadt_ali_cbct import preprocess
 
     write_volume(tmp_path / "cohort" / "patient01.nii.gz")
     write_volume(tmp_path / "cohort" / "patient02.nii.gz")
@@ -898,7 +898,7 @@ def test_naming_landmarks_replaces_the_region_selection():
     every landmark of both (58) to use seven, and one agent is a full two-scale
     walk of the volume.
     """
-    from sadt_ali.cbct import engine
+    from sadt_ali_cbct import engine
 
     weights = _weights_for(cbct_catalog.LABELS)
 
@@ -918,7 +918,7 @@ def test_naming_landmarks_replaces_the_region_selection():
 def test_an_empty_landmark_selection_leaves_the_regions_in_charge():
     """The ordinary case, and the default: an empty list means "not specified"
     and hands the choice back to `cbct_regions`."""
-    from sadt_ali.cbct import engine
+    from sadt_ali_cbct import engine
 
     weights = _weights_for(cbct_catalog.LABELS)
 
@@ -932,7 +932,7 @@ def test_an_empty_landmark_selection_leaves_the_regions_in_charge():
 def test_a_named_landmark_the_bundle_lacks_is_reported_not_dropped():
     """Same contract as the region path: "use another bundle" has to be
     distinguishable from "this scan is hard"."""
-    from sadt_ali.cbct import engine
+    from sadt_ali_cbct import engine
 
     weights = _weights_for(("Ba", "S", "N"))
 
@@ -1182,7 +1182,7 @@ def test_the_two_halves_of_the_panel_are_mutually_exclusive():
     """The visual complaint this argument exists to fix: both engines'
     selections were shown at once, so a CBCT user had to know which half to
     ignore."""
-    from sadt_ali import layout
+    from sadt_ali_cbct import layout
 
     assert layout.LAYOUT["cbct_regions"]["visible_when"] == {"modality": "CBCT"}
     assert layout.LAYOUT["landmarks"]["visible_when"] == {"modality": "CBCT"}

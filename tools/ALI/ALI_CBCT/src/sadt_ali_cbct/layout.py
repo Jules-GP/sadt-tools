@@ -1,0 +1,48 @@
+"""How a client should lay this tool's panel out. Presentation only.
+
+Nothing here changes what `run()` accepts — `describe.py` merges these hints
+into the published schema and refuses any that name an argument or an option
+the signature does not offer. Delete this file and the tool still works; the
+panel just gets worse.
+
+**Everything is DERIVED, never restated.** That is the whole difference from the
+`ArgSpec` tables this replaces. Those listed the anatomical tabs by hand, and a
+landmark added to the catalog was then reachable through no tab at all — offered
+by the schema, invisible in the UI. Here the tabs are computed from
+`catalog.GROUP_LABELS`, so a landmark added there appears in its tab with no
+edit here and no client release.
+
+Why it is needed at all: this tool publishes **119** landmark options. A schema
+that says "119 strings, pick some" is honest and produces a panel nobody can
+use.
+
+No `visible_when` anywhere, and that is the split showing through. It used to
+carry seven rules whose whole job was hiding the intraoral half of a shared
+schema; there is no intraoral half here any more, so every argument in this
+panel applies to every run of it.
+"""
+
+from . import catalog
+
+_INPUTS = "Inputs"
+_LANDMARKS = "Landmarks"
+_OUTPUTS = "Outputs"
+
+LAYOUT = {
+    "input": {"section": _INPUTS, "label": "Scan or Folder"},
+    "model": {"section": _INPUTS, "label": "Model Bundle"},
+    "regions": {"section": _LANDMARKS, "label": "Regions", "ui": "inline"},
+    "landmarks": {
+        "section": _LANDMARKS,
+        "label": "Individual landmarks",
+        # 119 check boxes in one column is a scroll, not a choice. The tabs are
+        # the SAME grouping the engine names its output files by, published
+        # rather than restated.
+        "ui": "tabs",
+        "groups": {
+            display: list(catalog.GROUP_LABELS[code])
+            for display, code in catalog.REGION_NAMES.items()
+        },
+    },
+    "prediction_ID": {"section": _OUTPUTS, "label": "Prediction ID"},
+}

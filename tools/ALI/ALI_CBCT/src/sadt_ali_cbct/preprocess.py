@@ -18,7 +18,7 @@ import os
 import numpy as np
 import SimpleITK as sitk
 
-from ..errors import ToolUnavailableError
+from .errors import ToolUnavailableError
 
 logger = logging.getLogger(__name__)
 

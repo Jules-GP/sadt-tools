@@ -27,9 +27,9 @@ import time
 
 import numpy as np
 
-from ..errors import ToolInputError
-from ..markups import MARKUPS_EXTENSION
-from ..markups import write as write_markups
+from .errors import ToolInputError
+from sadt_ali_common.markups import MARKUPS_EXTENSION
+from sadt_ali_common.markups import write as write_markups
 from . import catalog
 from . import preprocess
 from .agent import AGENT_FOV, MOVEMENT_COUNT, Agent, NotFound

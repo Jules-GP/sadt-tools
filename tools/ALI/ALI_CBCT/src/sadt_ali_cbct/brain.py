@@ -13,7 +13,7 @@ being constructed.
 
 import logging
 
-from ..errors import ToolUnavailableError
+from .errors import ToolUnavailableError
 
 logger = logging.getLogger(__name__)
 

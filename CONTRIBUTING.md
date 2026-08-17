@@ -212,6 +212,81 @@ it (Qt widgets, queue tables, RAM watchdogs, progress dialogs) is not part of
 the algorithm and does not come across. If you have to change logic, say so
 explicitly in the PR description and in the tool's README.
 
+### Duplicate the implementation, share the formats
+
+Two tools that need the same code usually get **two copies**. That is
+deliberate and it goes against the usual instinct: `nnunet_runner.py` exists
+twice, in AMASSS and in BatchDentalSeg, because each tool is its own virtualenv
+and importing across them would make one tool's missing dependency take both
+out of the registry. A copy costs a divergence; a coupling costs an entire
+class of failure. The copy usually wins.
+
+**The exception is anything that defines the shape of bytes leaving this
+repository.** File formats, extension vocabularies, on-disk layouts — anything
+a third party reads or writes. Those go in a shared package, because a
+divergence there does not fail, it produces output that one consumer accepts
+and another silently mis-reads.
+
+The example that settles it. Before the split, ALI's two engines both wrote
+Slicer markups files, and both set `display.visibility: false` in them. That
+switches the markups display node off: Slicer loads the file, builds the node,
+and draws nothing. The bug was invisible for as long as nobody opened a result
+outside the module, and it was in **both** copies — one mistake, written twice,
+because the format was duplicated rather than shared. It is now in
+`tools/ALI/common/`, imported by `ALI_CBCT` and `ALI_IOS` alike, along with the
+table of which file extensions count as a CBCT volume and which as a surface
+(the pre-port CLIs disagreed about `.stl`, so it was accepted by the UI and
+silently ignored by the CLI).
+
+What stays duplicated even between two halves of one tool: `errors.py`. Errors
+cross the process boundary by exception class **name** — the runner records the
+name, the server maps it to an HTTP status — so a shared base class is not
+merely unnecessary, it is not the mechanism.
+
+A shared package must declare **no dependencies**. It installs into several
+tool environments whose pins are deliberately incompatible, and anything it
+pulled in would have to be satisfiable by all of them at once — which is the
+constraint this repository exists to remove.
+
+### `[tool.uv.sources]` only applies to DECLARED dependencies
+
+A source says *where* a package comes from. It does not make the package a
+dependency. Name it in a source and forget to name it in `dependencies`, and uv
+resolves without complaint, installs nothing, and the failure arrives at
+runtime as a `ModuleNotFoundError` or — worse — as a *different* build of the
+package pulled in transitively from PyPI.
+
+It has caught three different things in this repository, which is what makes it
+a rule rather than an anecdote:
+
+| package | left undeclared | what happened |
+|---|---|---|
+| `pytorch3d` | pulled transitively by `shapeaxi` | source ignored, *"no wheels with a matching Python version tag"* |
+| `torchvision` | pulled transitively by the torch stack | came from PyPI, built against the default torch instead of cu128 — imports fine, then `RuntimeError: operator torchvision::nms does not exist` |
+| `sadt-ali-common` | a path dependency of ALI_CBCT/ALI_IOS | installed nothing at all; `ModuleNotFoundError` on first import |
+
+The rule: **if it has a `[tool.uv.sources]` entry, it must also be in
+`[project] dependencies` (or in an extra).** Transitive is not enough, and the
+two failure modes it produces — a missing module, and a right-version wrong-build
+C extension — look nothing like each other, so recognising one does not help you
+recognise the next.
+
+### A directory is a tool when its pyproject says so
+
+Discovery keys on a `[tool.sadt]` section, not on the presence of a
+`pyproject.toml` and not on where the directory sits:
+
+```toml
+[tool.sadt]
+tool = true
+```
+
+A shared path dependency (`tools/ALI/common/`, `testkit/`) has a
+`pyproject.toml` — it must, to be installable — and no `[tool.sadt]`, so it is
+importable, installable, and never discovered or served. This is what lets a
+grouping folder like `tools/ALI/` hold `ALI_CBCT/`, `ALI_IOS/` and `common/`
+side by side. Single-engine tools stay flat: there is no `tools/AMASSS/AMASSS/`.
+
 ## 5. Pin what upstream actually used
 
 **Do not bump torch, monai or numpy to "something newer that works".** Changing

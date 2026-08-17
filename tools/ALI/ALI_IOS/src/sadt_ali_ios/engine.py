@@ -26,10 +26,10 @@ import logging
 import os
 import time
 
-from ..cbct.brain import import_torch, resolve_device
-from ..errors import ToolInputError, ToolUnavailableError
-from ..markups import MARKUPS_EXTENSION
-from ..markups import write as write_markups
+from .brain import import_torch, resolve_device
+from .errors import ToolInputError, ToolUnavailableError
+from sadt_ali_common.markups import MARKUPS_EXTENSION
+from sadt_ali_common.markups import write as write_markups
 from . import catalog
 from . import render, surface
 
