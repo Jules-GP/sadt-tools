@@ -24,6 +24,34 @@ _OUTPUTS = "Outputs"
 _CBCT_ONLY = {"modality": catalogs.MODALITY_CBCT}
 _IOS_ONLY = {"modality": catalogs.MODALITY_IOS}
 
+# Narrower still, and each one mirrors a check in dispatch.py. An argument the
+# chosen mode never reads is not merely noise: shown as optional beside the
+# ones that matter, it reads as something the user chose not to fill, and the
+# refusal arrives at the end of a run instead of before it.
+_CBCT_SEGMENTED = {  # AMASSS produces the masks; Semi-Automated takes yours
+    "modality": catalogs.MODALITY_CBCT,
+    "automation": [catalogs.AUTOMATION_FULLY, catalogs.AUTOMATION_ORIENTED],
+}
+_CBCT_ORIENTED = {  # ASO orients the T1 first, and needs a reference for it
+    "modality": catalogs.MODALITY_CBCT,
+    "automation": catalogs.AUTOMATION_ORIENTED,
+}
+_IOS_ORIENTED = {  # the same, for the meshes
+    "modality": catalogs.MODALITY_IOS,
+    "automation": catalogs.AUTOMATION_FULLY,
+}
+# The patch decides the rest of the IOS panel: the mucogingival band is built
+# from landmarks and involves no network at all, while the palate is predicted
+# and involves nothing else. Asking for a checkpoint on the MGL side is how a
+# user comes to believe that mode needs one -- dispatch.py says as much where
+# it refuses. Listed rather than negated: `visible_when` compares, so "every
+# patch but MGL" is written by naming them.
+_IOS_MGL = {"modality": catalogs.MODALITY_IOS, "ios_patch": catalogs.PATCH_MGL}
+_IOS_PREDICTED = {
+    "modality": catalogs.MODALITY_IOS,
+    "ios_patch": [p for p in catalogs.PATCH_CHOICES if p != catalogs.PATCH_MGL],
+}
+
 LAYOUT = {
     "t1": {"section": _INPUTS, "label": "T1 (baseline)"},
     "t2": {"section": _INPUTS, "label": "T2 (follow-up)"},
@@ -41,32 +69,40 @@ LAYOUT = {
     },
     "t1_masks": {"section": _CBCT, "label": "T1 masks", "visible_when": _CBCT_ONLY},
     "segmentation_model": {
-        "section": _CBCT, "label": "Segmentation model", "visible_when": _CBCT_ONLY,
+        "section": _CBCT, "label": "Segmentation model", "visible_when": _CBCT_SEGMENTED,
     },
     "segmentation_label": {
-        "section": _CBCT, "label": "Mask label value", "visible_when": _CBCT_ONLY,
+        "section": _CBCT, "label": "Mask label value", "visible_when": _CBCT_SEGMENTED,
     },
     "cbct_reference": {
-        "section": _CBCT, "label": "Orientation reference", "visible_when": _CBCT_ONLY,
+        "section": _CBCT, "label": "Orientation reference", "visible_when": _CBCT_ORIENTED,
     },
     "landmark_model": {
-        "section": _CBCT, "label": "Landmark model bundle", "visible_when": _CBCT_ONLY,
+        "section": _CBCT, "label": "Landmark model bundle", "visible_when": _CBCT_ORIENTED,
     },
     "dicom_input": {"section": _INPUTS, "label": "Input is DICOM", "visible_when": _CBCT_ONLY},
 
     # -- IOS ----------------------------------------------------------------
     "ios_reference": {
-        "section": _IOS, "label": "Orientation reference", "visible_when": _IOS_ONLY,
+        "section": _IOS, "label": "Orientation reference", "visible_when": _IOS_ORIENTED,
     },
     "ios_patch": {"section": _IOS, "label": "Registration patch", "visible_when": _IOS_ONLY},
     "registration_model": {
-        "section": _IOS, "label": "Patch model", "visible_when": _IOS_ONLY,
+        "section": _IOS, "label": "Patch model", "visible_when": _IOS_PREDICTED,
+    },
+    # Only the Fully-Automated mode labels the crowns itself; the others take
+    # meshes that already carry the array, whatever the patch.
+    "crown_model": {
+        "section": _IOS, "label": "Crown segmentation model", "visible_when": _IOS_ORIENTED,
+    },
+    "mgl_model": {
+        "section": _IOS, "label": "Mucogingival landmark bundle", "visible_when": _IOS_MGL,
     },
     "mgl_landmarks": {
-        "section": _IOS, "label": "Mucogingival landmarks", "visible_when": _IOS_ONLY,
+        "section": _IOS, "label": "Mucogingival landmarks", "visible_when": _IOS_MGL,
     },
     "mgl_patch_height": {
-        "section": _IOS, "label": "Patch height (mm)", "visible_when": _IOS_ONLY,
+        "section": _IOS, "label": "Patch height (mm)", "visible_when": _IOS_MGL,
     },
 
     "output_suffix": {"section": _OUTPUTS, "label": "Output suffix"},

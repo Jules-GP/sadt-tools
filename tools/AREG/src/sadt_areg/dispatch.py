@@ -81,6 +81,8 @@ def register(
     orientation_reference: str = None,
     landmark_model: str = None,
     registration_model: str = None,
+    crown_model: str = None,
+    mgl_model: str = None,
     ios_patch: str = catalogs.PATCH_PALATE,
     mgl_landmarks_path: str = None,
     mgl_patch_height: float = None,
@@ -135,6 +137,8 @@ def register(
             t2_root=t2_root,
             automation=automation,
             registration_model=registration_model,
+            crown_model=crown_model,
+            mgl_model=mgl_model,
             orientation_reference=orientation_reference,
             ios_patch=ios_patch,
             mgl_landmarks_path=mgl_landmarks_path,
@@ -176,6 +180,8 @@ def main(
     landmark_model=None,
     ios_reference=None,
     registration_model=None,
+    crown_model=None,
+    mgl_model=None,
     ios_patch=None,
     mgl_landmarks=None,
     mgl_patch_height=None,
@@ -227,6 +233,8 @@ def main(
         orientation_reference=str(reference) if reference else None,
         landmark_model=landmark_model,
         registration_model=str(registration_model) if registration_model else None,
+        crown_model=str(crown_model) if crown_model else None,
+        mgl_model=str(mgl_model) if mgl_model else None,
         ios_patch=patch,
         mgl_landmarks_path=str(mgl_landmarks) if mgl_landmarks else None,
         mgl_patch_height=mgl_patch_height,
@@ -450,7 +458,7 @@ def _roll_up_regions(patients: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _run_ios(
-    t1_root, t2_root, automation, registration_model, orientation_reference,
+    t1_root, t2_root, automation, registration_model, crown_model, mgl_model, orientation_reference,
     ios_patch, mgl_landmarks_path, mgl_patch_height,
     output_dir, work_dir, suffix, report, sup=None,
 ) -> None:
@@ -479,8 +487,8 @@ def _run_ios(
         # Label the crowns, then orient -- the order the Slicer chain used, and
         # the necessary one: ASO's fully-automated IOS mode aligns a mesh by its
         # tooth centroids, so the labels have to exist first.
-        t1_root = tools.label_crowns(sup, t1_root)
-        t2_root = tools.label_crowns(sup, t2_root)
+        t1_root = tools.label_crowns(sup, t1_root, crown_model or "")
+        t2_root = tools.label_crowns(sup, t2_root, crown_model or "")
         t1_root = tools.orient_scans(
             sup,
             t1_root, orientation_reference, catalogs.MODALITY_IOS
@@ -533,7 +541,7 @@ def _run_ios(
                 # holds the palatal checkpoint and the orientation references,
                 # none of which is a landmark bundle.
                 _merge_into(
-                    tools.predict_mucogingival(sup, root, tool_name="ALI"),
+                    tools.predict_mucogingival(sup, root, mgl_model or ""),
                     landmark_root,
                 )
             report["mgl_landmarks"] = "predicted by 'ALI'"

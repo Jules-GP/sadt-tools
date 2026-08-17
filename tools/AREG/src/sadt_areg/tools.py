@@ -183,6 +183,12 @@ def predict_mucogingival(sup, mesh_dir: str, model_path: str = "") -> str:
     parameters = {
         "input": mesh_dir,
         "output_dir": _output(sup, "ALI"),
+        # Named, not left to ALI's default: it defaults to CBCT, and these are
+        # surfaces. ALI reads the modality from the data too and refuses a
+        # mismatch, so omitting it is a run that fails rather than one that
+        # guesses -- which is the right trade for a caller, and the wrong one
+        # here, where AREG knows.
+        "modality": "IOS",
         "ios_networks": ["Mucogingival"],
         "prediction_ID": "MG_Pred",
     }
