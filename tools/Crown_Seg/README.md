@@ -75,52 +75,101 @@ Three things worth knowing before reading a result:
 
 ## Versions
 
-torch 2.8.0+cu128, vtk 9.6.2, numpy 2.3.2, Python 3.11 — the deployed stack, as
-for AMASSS and BatchDentalSeg. The engine is **not** in that set:
+torch 2.11.0+cu128, torchvision 0.26.0+cu128, pytorch3d 0.7.9+pt2110cu128,
+vtk 9.6.2, numpy 2.3.2, Python 3.11.
+
+These follow **upstream SlicerAutomatedDentalTools**, which is the reference:
+its shared `shapeaxi` conda env is created with `ocnn==2.2.1`,
+`shapeaxi>=2.0.2` and `SimpleITK`, and every pytorch3d-dependent module (ALI,
+AREG, ASO, DOCShapeAXI, FlexReg) ships an `install_pytorch.py` that reads
+<https://ImageMindAnalytics.github.io/pytorch3d-wheels/simple/> and picks the
+wheel whose `+ptXXXcuYYY` tag matches the installed torch. The earlier
+`torch==2.8.0` here came from this port, not from upstream.
 
 ```toml
 [project.optional-dependencies]
-segmentation = ["shapeaxi==2.0.2", "pytorch3d"]
+segmentation = [
+    "shapeaxi>=2.0.2", "ocnn==2.2.1", "SimpleITK",
+    "pytorch3d==0.7.9+pt2110cu128", "torchvision==0.26.0",
+]
 ```
 
-`shapeaxi` requires `pytorch3d`, which publishes no usable wheel: the newest
-release on PyPI is 0.7.4 with wheels for cp38–cp310 only, built against a torch
-generations older than ours. It is compiled from source, which needs a CUDA
-toolkit and tens of minutes — so it sits behind an extra. A plain `uv sync`
-therefore stays fast, CI can still import the package and publish its schema, and
-only an actual segmentation needs the extra. `pipeline._import_dental_model_seg`
-raises `ToolUnavailableError` naming the command to run.
+**We are deliberately stricter than upstream on one point**: upstream leaves
+torch unpinned, so it arrives as a shapeaxi dependency and resolves to whatever
+is current. We pin `torch==2.11.0`. An unpinned torch is not reproducible — the
+same `uv sync` two months apart gives two different runtimes — and the pytorch3d
+wheel tag names one torch version and one CUDA variant *exactly*. Bumping torch
+therefore means bumping the pytorch3d tag in the same commit; they are one
+decision, not two.
 
-shapeaxi 2.0.2 asks for `torch>=2.8,<2.13`, so the pinned 2.8.0 satisfies it and
-**no second torch runtime is needed** — which was the risk that put this tool
-last in the migration order.
+### Python 3.11, not 3.12
 
-### The incantation that makes it resolvable
+Upstream moved this env to 3.12 because shapeaxi 1.0.10 pinned
+`grpcio==1.51.1`, which has no cp312 wheel. shapeaxi 2.0.2 dropped that pin, so
+grpcio resolves to 1.83.0, which publishes cp311 wheels — the reason for the
+move no longer applies. Verified rather than assumed: the full set
+(shapeaxi 2.0.2, ocnn 2.2.1, torch 2.11.0, pytorch3d, monai, itk) resolves on
+3.11 in under a second.
 
-Two non-obvious pieces, both load-bearing:
+### The four numbers that must agree
+
+pytorch3d and torchvision both ship compiled extensions linked against one
+specific torch build. Three numbers have to line up — torch version, CUDA
+variant, Python ABI — and a mismatch is **not** an install error: the package
+imports fine and dies on the first CUDA kernel.
 
 ```toml
-[tool.uv.sources]
-pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", tag = "v0.7.9" }
+[[tool.uv.index]]
+name = "pytorch3d-wheels"
+url = "https://ImageMindAnalytics.github.io/pytorch3d-wheels/simple/"
+explicit = true      # a PINNED SOURCE, never --extra-index-url
 
-[tool.uv.extra-build-dependencies]
-pytorch3d = ["torch"]
+[tool.uv.sources]
+torch       = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+pytorch3d   = { index = "pytorch3d-wheels" }
 ```
 
-- `pytorch3d` is listed as a **direct** dependency in the extra even though
-  shapeaxi pulls it transitively, because `tool.uv.sources` only applies to
-  direct dependencies. Left transitive, uv ignores the git source and fails with
-  *"no wheels with a matching Python version tag"*.
-- `extra-build-dependencies` puts torch into pytorch3d's isolated build
-  environment. Its `setup.py` imports torch without declaring it, so without
-  this the lock fails with `ModuleNotFoundError: No module named 'torch'`.
-  `no-build-isolation-package` does **not** work here — it stops uv from
-  providing torch rather than making it available.
+- `explicit = true` is what makes these pinned sources. As extra index URLs uv
+  is free to mix registries: a torch `2.11.0+cu130` paired with a
+  `pt2120cu126` wheel, failing at runtime on a missing `libcudart.so.12`.
+- **`torchvision` is listed as a direct dependency**, for the same reason
+  `pytorch3d` is: `tool.uv.sources` applies to direct dependencies only. Left
+  transitive through shapeaxi it comes from PyPI, and PyPI's torchvision is
+  built against the default torch rather than the cu128 one. The version
+  pairing is right (0.26 ↔ 2.11) and it still fails, with
+  `RuntimeError: operator torchvision::nms does not exist`. Measured here, not
+  anticipated.
+- pytorch3d is no longer compiled from git. Upstream installs a prebuilt wheel
+  and so do we, which removes the CUDA toolkit and the tens of minutes.
 
-With both, `uv lock` resolves 166 packages in about half a minute.
-`uv sync --extra segmentation` then compiles pytorch3d; the deployment should do
-that once and keep the wheel in a local `/wheels` directory rather than
-rebuilding it per image.
+`uv lock` resolves 172 packages in under a second.
+
+### Verified on the GPU
+
+An import proves nothing; the wheel has to run a kernel:
+
+```
+torch 2.11.0+cu128   CUDA 12.8   NVIDIA RTX 6000 Ada Generation
+torchvision 0.26.0+cu128         torchvision::nms registered
+pytorch3d 0.7.9+pt2110cu128      knn_points on cuda -> OK
+```
+
+End to end on `T1_01_U_segmented.vtk` (294,260 points) with
+`skip_segmented=False` to force the engine: **52.3 s**, 15 distinct tooth
+labels, and `PredictedID` **bit-identical to the reference — 0 of 294,260
+points differ**.
+
+`PredictedID` is the array to compare, and the only one. It is the network's
+raw per-point prediction; `Universal_ID` is shapeaxi's post-processed
+labelling, which the section below shows is not deterministic between two runs
+of the *same* code. Bit-identical `PredictedID` under torch 2.11 + pytorch3d
+0.7.9+pt2110cu128 therefore says the version move does not perturb inference at
+all — a stronger statement than any agreement percentage, and the same result
+the pre-port validation recorded against torch 2.8.
+
+`uv sync --extra segmentation` no longer compiles anything: the wheel is
+prebuilt, so there is nothing to cache in a local `/wheels` directory.
 
 ## Validated against
 
