@@ -289,6 +289,27 @@ def segment_crowns(
     for mesh in meshes:
         (already_segmented if skip_segmented and is_segmented(mesh) else to_segment).append(mesh)
 
+    # Probed HERE, before the split decides whether the engine is ever reached.
+    # The engine is imported inside `_run_shapeaxi`, which only runs when
+    # something needs segmenting -- so a batch that happens to be entirely
+    # pre-labelled returned a clean report on a deployment where the
+    # `segmentation` extra is not installed at all, and the same deployment
+    # failed the moment one raw mesh appeared. A tool that can serve some
+    # batches and not others is not available; it just has not been asked the
+    # right question yet.
+    #
+    # Not raised here: a pre-labelled batch is still legitimately served, and
+    # refusing it would break the Crown_Seg -> ALI chain for callers who
+    # segmented elsewhere. It is RECORDED, so the report says what this run
+    # could and could not have done. The real fix is server-side -- the
+    # registry must refuse to serve a tool whose declared extras are absent,
+    # the same way it refuses a tool whose schema no longer matches its source.
+    try:
+        _import_dental_model_seg()
+        engine_available, engine_error = True, None
+    except Exception as exc:  # ToolUnavailableError, or anything its import raises
+        engine_available, engine_error = False, f"{type(exc).__name__}: {exc}"
+
     records = {}
     produced = []
 
@@ -303,7 +324,21 @@ def segment_crowns(
         )
         os.makedirs(os.path.dirname(destination), exist_ok=True)
         _write_as_vtk(mesh, destination)
-        records[relative] = {"status": "already_segmented", "output": destination}
+        # `engine_unavailable` when this deployment could not have segmented
+        # anything anyway. The name is the server's existing vocabulary for
+        # "this installation cannot do that" -- ToolUnavailableError, answered
+        # as 501 -- so the status reads with it rather than beside it.
+        # `already_segmented` means "it did not need doing";
+        # `engine_unavailable` means "it did not need doing, AND could not have
+        # been done". `engine_error` holds the reason.
+        #
+        # Putting it in the status rather than only in a field further down is
+        # the right PLACE, not a guarantee it is seen: nothing reads this
+        # report today, CrownSeg having no client module at all.
+        records[relative] = {
+            "status": "already_segmented" if engine_available else "engine_unavailable",
+            "output": destination,
+        }
         produced.append(destination)
 
     if to_segment:
@@ -365,10 +400,21 @@ def segment_crowns(
         # this run produced them or found them already labelled. This is what a
         # caller sequencing CrownSeg before ALI reads.
         "segmented_meshes": produced,
+        # So a caller can tell "nothing needed segmenting" from "nothing COULD
+        # have been segmented". Without it the two produce an identical report.
+        "engine_available": engine_available,
+        "engine_error": engine_error,
         "summary": {
             "total": len(meshes),
             "segmented": sum(1 for r in records.values() if r["status"] == "segmented"),
-            "already_segmented": len(already_segmented),
+            # Counted off the records rather than off `already_segmented`, so
+            # these two never contradict the per-mesh statuses above: a
+            # degraded run reports 0 already_segmented and N
+            # engine_unavailable, not N of both.
+            "already_segmented": sum(
+                1 for r in records.values() if r["status"] == "already_segmented"
+            ),
+            "engine_unavailable": sum(1 for r in records.values() if r["status"] == "engine_unavailable"),
             "failed": sum(1 for r in records.values() if r["status"] == "failed"),
         },
         "duration_seconds": round(time.monotonic() - started_at, 2),

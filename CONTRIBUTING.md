@@ -212,6 +212,51 @@ it (Qt widgets, queue tables, RAM watchdogs, progress dialogs) is not part of
 the algorithm and does not come across. If you have to change logic, say so
 explicitly in the PR description and in the tool's README.
 
+### A guard counts what the tool produced, not what it walked past
+
+Every tool here tolerates a partial failure — one unreadable scan must not cost
+the other 199 — and every tool therefore ends with a guard that refuses to
+return when nothing worked. Three of them counted the wrong noun, and all three
+returned a clean report on a run that had produced nothing:
+
+| tool | the guard counted | what it should have counted |
+|---|---|---|
+| `ALI_CBCT` | scans whose status was `ok` | landmarks actually placed |
+| `Surg_Mov_Pred` | model packages successfully **loaded** | predictions actually **produced** |
+| `Crown_Seg` | files written to the output tree | segmentations actually **performed** |
+
+Each is one noun away from correct, and each failure is invisible from the
+outside: the response is a 200, the report is full of successes, and the output
+directory has files in it. `ALI_CBCT` shows what that costs — a scan on which
+every agent failed to converge was recorded `ok`, so a torch upgrade that left
+two landmarks unplaced reported success, and the only thing that caught it was
+comparing coordinates by hand against a reference.
+
+Two habits follow:
+
+- **Name the guard after the output.** `if not written`, `if not
+  predictions_by_target` — not `if not processed`. The noun you count is the
+  claim you are making.
+- **A guard at one stage does not cover the next.** `Surg_Mov_Pred` refused to
+  continue when no model could be *loaded*, then predicted nothing perfectly
+  happily. If a stage can produce zero, it needs its own guard however well
+  guarded the stage before it is.
+
+A fourth case is not a counting mistake and is worth recognising separately: a
+guard that is never reached. `Crown_Seg` imports its segmentation engine inside
+the branch that segments, so a batch of already-labelled meshes returned a clean
+report on a deployment where the engine could not run at all. **A tool's
+availability must not depend on its input data** — one that can serve some
+batches and not others is not available, it has only not been asked the right
+question yet.
+
+When a tool records that condition, name it with the vocabulary the server
+already has: `ToolUnavailableError` is answered as a 501, so a per-item status
+of `engine_unavailable` reads with that and `degraded` reads beside it. And
+remember what recording buys and what it does not — a field is only a signal if
+something reads it. Putting the fact in the status rather than in a side field
+is the right *place*; it is not a guarantee anyone sees it.
+
 ## 5. Pin what upstream actually used
 
 **Do not bump torch, monai or numpy to "something newer that works".** Changing
