@@ -63,10 +63,17 @@ The server runs it out of process, one interpreter per tool:
 /tools/<name>/.venv/bin/python /opt/sadt/runner.py --job /jobs/<uuid>/job.json
 ```
 
-`runner.py` ships with the server, so runner and server are always the same
-version and there is no cross-repo skew to manage. That is also why there is no
-shared `sadt-core` package: adding one would put a version of *ours* inside
-every tool venv, and it would solve a problem that does not exist.
+`runner.py` ships with the server and is injected by absolute path — never
+installed into a tool venv — so runner and server are always the same version
+and there is no cross-repo skew to manage. That is also why there is no shared
+`sadt-core` package: adding one would put a version of *ours* inside every tool
+venv, and it would solve a problem that does not exist.
+
+A tool that needs another tool **mid-run** declares `*, sup` and is handed a
+supervisor; the call re-enters the same runner with the sibling's interpreter.
+`ASO` and `AREG` are the two that do. Everything the server has to hold up on
+its side of that — and everything else it took over when the tools stopped
+doing it — is in [docs/SERVER_CONTRACT.md](docs/SERVER_CONTRACT.md).
 
 The full set of rules — annotations, defaults, batch inputs, where output may be
 written — is in [CONTRIBUTING.md](CONTRIBUTING.md). `tools/_template/` is a
@@ -142,25 +149,27 @@ chains to other tools when one asks for it. The parser is built from `run()`'s
 signature, so there is no per-tool CLI to keep in step with anything:
 
 ```console
-$ python scripts/run_tool.py ALI --input scan.nii.gz --model bundle/ \
+$ python scripts/run_tool.py ALI_CBCT --input scan.nii.gz --model bundle/ \
       --output-dir out/ --landmarks Ba S N
 out/
 
 $ python scripts/run_tool.py ASO --input cohort/ --reference gold/ \
-      --output-dir out/ --automation Fully-Automated --landmark-models bundle/
-[sup] 20% predicting landmarks with ALI
-[sup] running ALI
+      --output-dir out/ --automation Fully-Automated --landmark-model bundle/
+[sup] 20% predicting landmarks with ALI_CBCT
+[sup] running ALI_CBCT
 out/
 ```
 
 The second command is the whole point: ASO needs landmarks mid-run, so it is
-given a **supervisor**, and `sup.run("ALI", ...)` re-enters this same script with
-ALI's interpreter. Chaining and nesting are the same recursion — `AREG → ASO →
-ALI` would be three levels of it with no special case.
+given a **supervisor**, and `sup.run("ALI_CBCT", ...)` re-enters this same
+script with that tool's interpreter. Chaining and nesting are the same
+recursion — `AREG → ASO → ALI_CBCT` is three levels of it with no special case.
 
 **Developer convenience, not the deployment path.** In production the server's
-runner does this. It is also the shortest readable reference for what a
-supervisor has to be: five members, duck-typed, nothing shared.
+`execution/runner.py` does this, and a tool cannot tell the two apart: five
+members, duck-typed, nothing shared. It is still the shortest readable
+reference for what a supervisor has to be — and the place to reproduce a
+chaining bug without standing a server up.
 
 ## Getting started
 

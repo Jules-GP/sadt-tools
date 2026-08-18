@@ -126,6 +126,17 @@ any that names an argument the signature does not take, an option it does not
 offer, or a value a condition could never match. Absent is fine — the schema is
 then exactly what it was before.
 
+The set is a **joint** decision with the server: a key it does not name is
+dropped silently on the way through — that happened once, and was invisible
+from both ends — so adding a seventh here does nothing until it is added there
+too. One is pending in that direction: **`options_when`**,
+`{other_arg: {value: [options]}}`, which narrows a choice argument's own
+options instead of hiding the whole field. The server accepts it and the client
+renders it; `LAYOUT_KEYS` does not emit it. It is what `AREG` wants for its
+three automation modes — all meaningful, none of which offers "Oriented +
+Fully-Automated" on IOS, so today the combo box offers a mode that fails at the
+end of a run.
+
 **Derive it, never restate it.** This replaces the `ArgSpec` tables, and those
 drifted precisely because they listed options by hand: a landmark added to the
 catalog was published by the schema and reachable through no tab at all.
@@ -178,7 +189,14 @@ def run(scans: Path, reference: Path, output_dir: Path, *, sup=None) -> Path:
   calling it and failing halfway. A `sup` that is positional or annotated is a
   hard error, not a schema entry.
 - It is **duck-typed**. Never import a supervisor type — that would need a
-  package shared with the server, which is what the split removes.
+  package shared with the server, which is what the split removes. Three
+  implementations produce the same shape and a tool cannot tell them apart: the
+  server's (`server/execution/runner.py`), `scripts/run_tool.py`, and the dozen
+  lines wrapping `sadt-testkit` in `tools/ASO/tests/`.
+- **A cycle is refused by name, not by depth.** The server carries the chain of
+  tools already running above a call, so asking for one of them fails at once
+  and names the chain. The depth cap (5) is only a backstop for a chain that
+  grows without repeating; the deepest real one is `AREG → ASO → ALI_CBCT`.
 - Five members, nothing more: `sup.run(tool, **params)`, `sup.out`, `sup.tmp`,
   `sup.progress(fraction, message)`, `sup.log(message)`.
 - `sup.run("ALI", ...)`, never `sup.ALI(...)`. A typo in a string is greppable;
