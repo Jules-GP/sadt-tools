@@ -26,6 +26,13 @@ _OUTPUTS = "Outputs"
 
 _CBCT_ONLY = {"modality": catalogs.MODALITY_CBCT}
 _IOS_ONLY = {"modality": catalogs.MODALITY_IOS}
+# The bundle the landmark tool runs with, and it only runs in Fully-Automated:
+# Semi-Automated registers on landmarks the caller already has. Shown in both,
+# it reads as a model the semi-automated run silently ignores.
+_CBCT_PREDICTED = {
+    "modality": catalogs.MODALITY_CBCT,
+    "automation": catalogs.AUTOMATION_FULLY,
+}
 
 LAYOUT = {
     "input": {"section": _INPUTS, "label": "Scan / Landmark Folder"},
@@ -51,7 +58,7 @@ LAYOUT = {
     "landmark_model": {
         "section": _CBCT,
         "label": "Landmark model bundle",
-        "visible_when": _CBCT_ONLY,
+        "visible_when": _CBCT_PREDICTED,
     },
     "dicom_input": {
         "section": _INPUTS,

@@ -17,6 +17,8 @@ Two changes worth knowing about:
 import os
 
 import numpy as np
+
+from ..errors import ToolInputError
 import vtk
 from vtk.util.numpy_support import vtk_to_numpy
 
@@ -124,7 +126,30 @@ def points_of(surface: vtk.vtkPolyData) -> np.ndarray:
 
 
 def labels_of(surface: vtk.vtkPolyData, array_name: str) -> np.ndarray:
-    return vtk_to_numpy(surface.GetPointData().GetScalars(array_name))
+    """The per-point tooth labels, whatever the producer named the array.
+
+    `array_name` is tried first, so a caller that names one still decides, then
+    markups.LABEL_ARRAY_NAMES -- the table this module already imported and
+    this function was alone in not using. It matters here and nowhere else:
+    the scan carries what the crown-segmentation tool wrote (`Universal_ID`)
+    and the shipped gold reference carries `PredictedID`, and orienting one
+    onto the other reads both in the same call. Looking only for the caller's
+    name made the published reference unusable, with an AttributeError three
+    frames deep inside vtk naming neither the file nor the array.
+    """
+    point_data = surface.GetPointData()
+    for name in (array_name,) + LABEL_ARRAY_NAMES:
+        if not name:
+            continue
+        array = point_data.GetScalars(name)
+        if array is not None:
+            return vtk_to_numpy(array)
+    present = [point_data.GetArrayName(i) for i in range(point_data.GetNumberOfArrays())]
+    raise ToolInputError(
+        f"This surface carries no tooth-label array: looked for {array_name!r} and "
+        f"{list(LABEL_ARRAY_NAMES)}, and it has {present}. A mesh has to be crown-"
+        f"segmented before it can be oriented from its teeth."
+    )
 
 
 def _read_off(path: str) -> vtk.vtkPolyData:

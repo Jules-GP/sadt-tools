@@ -48,6 +48,8 @@ def run(
         "Palate (upper arch)", "Mucogingival line (lower arch)"
     ] = "Palate (upper arch)",
     registration_model: Path = "",
+    crown_model: Path = "",
+    mgl_model: Path = "",
     mgl_landmarks: Path = "",
     mgl_patch_height: float = 0.0,
     dicom_input: bool = False,
@@ -92,6 +94,11 @@ def run(
         ios_patch: IOS only. Which part of the arch to match on — the palate for
             an upper arch, the band around the mucogingival line for a lower one.
         registration_model: IOS only. The model that finds the patch.
+        mgl_model: IOS only. The landmark bundle the mucogingival line is
+            predicted from, when no landmarks are sent.
+        crown_model: IOS only. The checkpoint the crown-labelling tool runs
+            with, for the Fully-Automated mode that labels the meshes itself.
+            A mesh that already carries its tooth-label array needs none.
         mgl_landmarks: IOS only, and only for the mucogingival patch. Your own
             13 landmarks per lower scan, instead of having them predicted.
         mgl_patch_height: IOS only. How far the band extends from the
@@ -126,6 +133,8 @@ def run(
         landmark_model=str(landmark_model) if landmark_model else None,
         ios_reference=str(ios_reference) if ios_reference else None,
         registration_model=str(registration_model) if registration_model else None,
+        crown_model=str(crown_model) if crown_model else None,
+        mgl_model=str(mgl_model) if mgl_model else None,
         ios_patch=ios_patch,
         mgl_landmarks=str(mgl_landmarks) if mgl_landmarks else None,
         mgl_patch_height=mgl_patch_height or None,
