@@ -31,6 +31,10 @@ dependencies = [
 # package, importable and installable, never discovered or served.
 [tool.sadt]
 tool = true
+# The API identity: what a client sends, what deployment.toml is keyed by, and
+# what another tool passes to `sup.run()`. Declared rather than derived from the
+# directory, so this tool keeps its name while living inside a grouping folder.
+name = "ALI_IOS"
 
 [dependency-groups]
 dev = ["pytest==8.3.4", "sadt-testkit"]
