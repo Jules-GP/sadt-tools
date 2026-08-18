@@ -261,6 +261,28 @@ it (Qt widgets, queue tables, RAM watchdogs, progress dialogs) is not part of
 the algorithm and does not come across. If you have to change logic, say so
 explicitly in the PR description and in the tool's README.
 
+### Enumerate, never pattern-match, when comparing against upstream
+
+Comparing our port against an upstream module means listing what each side
+declares. List it — do not filter it through a regex you wrote from memory.
+
+The cost is not a missed line, it is a **confident wrong answer**. An audit of
+every tool's arguments used `^\s+([a-z_]+)\s*:` to pull parameter names out of
+a `run()` signature. It silently dropped every argument containing a capital,
+which is exactly `prediction_ID` — and the report that came out of it named
+AMASSS's missing `prediction_ID` as an API inconsistency across tools meant to
+compose with each other. AMASSS has had it all along, in its signature,
+documented and wired. So did Batch_Dental_Seg.
+
+Upstream CLI parameters mix case freely (`DCMInput`, `SegmentInput`,
+`save_in_folder`, `lm_type`), and so do ours. A filter that assumes otherwise
+produces a table that looks like coverage and is not — the same defect the
+audit itself exists to find, turned on the instrument.
+
+Use `[A-Za-z_][A-Za-z0-9_]*`, or better, parse rather than grep: `ast` for a
+signature, an XML reader for a `.xml`. And when a finding is sharp enough to act
+on, re-derive it a second way before reporting it.
+
 ### A guard counts what the tool produced, not what it walked past
 
 Every tool here tolerates a partial failure — one unreadable scan must not cost

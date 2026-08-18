@@ -69,6 +69,23 @@ rest are this migration's.
   tool no longer resolves paths, so `model` is required and the server picks.
   The layout check survives: a bundle of the wrong kind is still refused with a
   message naming both kinds, which is what that code was really for.
+- **Per-tooth selection is not exposed.** Upstream's IOS CLI takes `teeth` and
+  `teeth_mg` — which teeth to predict on, and which to predict the mucogingival
+  point for. `ALI_IOS` takes neither: every tooth the mesh carries a label for is
+  predicted, on every run.
+
+  Believed safe to omit for now, and stated rather than dropped in silence. The
+  networks run per tooth either way, so the selection buys time rather than a
+  different result, and a caller that wants a subset can filter the markups file
+  it gets back. What it would cost is a batch where only a few teeth are of
+  interest: that run does the full arch and pays for it.
+
+  If that turns out to matter, this is a stated gap to reopen rather than a
+  rediscovery. Found by comparing against upstream d5a48c4 (2026-08-18); see the
+  same audit's note on the six inference-tuning parameters (`spacing`,
+  `agent_FOV`, `spawn_radius`, `image_size`, `blur_radius`, `faces_per_pixel`),
+  which are deliberately not exposed either.
+
 - **CrownSeg is no longer called.** `ALILogic.ensure_segmented()` imported
   `tools.CrownSeg` in-process and segmented an unlabelled mesh on the fly.
   Tools do not call each other; `ios.engine.require_labels()` refuses the batch
