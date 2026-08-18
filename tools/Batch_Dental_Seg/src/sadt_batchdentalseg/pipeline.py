@@ -34,6 +34,7 @@ arguments rather than server settings.
 import json
 import logging
 import os
+from pathlib import Path
 import shutil
 import time
 
@@ -42,6 +43,17 @@ from .errors import ToolInputError
 from .scans import SCAN_EXTENSIONS, compressed_extension, split_scan_extension
 
 logger = logging.getLogger(__name__)
+
+
+# The tool's own name, derived rather than written down. `describe.py` publishes
+# `tool_dir.name` as the schema's `name`, so taking it from the same place is
+# what keeps a report and the schema from disagreeing -- which they already did:
+# this file said "CrownSeg" and "BatchDentalSeg" long after the folders were
+# renamed to the underscored convention, and nothing noticed because nothing
+# reads the field yet.
+#
+# `parents[2]` is <tool>/src/<package>/thisfile.py -> <tool>.
+TOOL_NAME = Path(__file__).resolve().parents[2].name
 
 # Intermediates go here, under the caller's output directory, and are removed
 # before returning. A leading dot keeps them out of the way if a run dies
@@ -329,7 +341,7 @@ def segment(
 
     succeeded = [entry for entry in report_scans if entry.get("status") == "ok"]
     report = {
-        "tool": "BatchDentalSeg",
+        "tool": TOOL_NAME,
         "model": model.name,
         "model_description": model.description,
         # Published with the results: the segmentation is a label volume, and

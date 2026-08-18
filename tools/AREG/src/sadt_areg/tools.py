@@ -48,7 +48,7 @@ _ADVICE = {
         "Segment the crowns yourself -- the meshes need a per-point tooth-label array "
         "-- and use Semi-Automated mode instead."
     ),
-    "ALI": (
+    "ALI_IOS": (
         "Send the 13 mucogingival landmarks per lower scan in 'mgl_landmarks' instead."
     ),
 }
@@ -179,19 +179,23 @@ def predict_mucogingival(sup, mesh_dir: str, model_path: str = "") -> str:
     here. ALI restricts it to the mandible itself, so an upper arch in the batch
     costs nothing.
     """
-    logger.info("AREG: asking 'ALI' for mucogingival landmarks")
+    logger.info("AREG: asking 'ALI_IOS' for mucogingival landmarks")
     parameters = {
         "input": mesh_dir,
-        "output_dir": _output(sup, "ALI"),
-        # Named, not left to ALI's default: it defaults to CBCT, and these are
-        # surfaces. ALI reads the modality from the data too and refuses a
-        # mismatch, so omitting it is a run that fails rather than one that
-        # guesses -- which is the right trade for a caller, and the wrong one
-        # here, where AREG knows.
-        "modality": "IOS",
-        "ios_networks": ["Mucogingival"],
+        "output_dir": _output(sup, "ALI_IOS"),
+        # No `modality` any more, and that is the split showing through: this
+        # used to pass "IOS" explicitly because ALI was one tool serving both,
+        # defaulted to CBCT, and would have been handed surfaces. ALI_IOS takes
+        # no such argument -- the tool IS the modality -- so passing it now
+        # fails on an unexpected keyword. The disambiguation was deleted rather
+        # than moved.
+        #
+        # `networks`, not `ios_networks`, for the same reason: an argument that
+        # only ever applied to one modality stopped needing the prefix that told
+        # them apart.
+        "networks": ["Mucogingival"],
         "prediction_ID": "MG_Pred",
     }
     if model_path:
         parameters["model"] = model_path
-    return _returned(sup.run("ALI", **parameters))
+    return _returned(sup.run("ALI_IOS", **parameters))

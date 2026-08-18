@@ -10,7 +10,7 @@ import os
 
 import numpy as np
 
-from ..errors import ToolUnavailableError
+from .errors import ToolUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ def surface_properties(scaled_surface, device):
     found and the run ends reporting no landmarks with no reason given. The
     engine checks every mesh for labels up front, so this is the backstop.
     """
-    from ..cbct.brain import import_torch
+    from .brain import import_torch
 
     torch = import_torch()
     _, vtk_to_numpy = import_vtk()

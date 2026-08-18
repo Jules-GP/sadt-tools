@@ -25,6 +25,18 @@ dependencies = [
 # Crown_Seg's: pytorch3d publishes no usable wheel and compiles from source
 # against the pinned torch. A plain `uv sync` stays fast, CI can still import the
 # package and publish its schema, and the CBCT engine works without it.
+# What makes this directory a tool. A directory holding a pyproject.toml
+# WITHOUT this section -- a shared path dependency, the testkit -- is a plain
+# package: importable, installable, never discovered or served.
+#
+# `name` is the API identity: what a client sends, what deployment.toml is keyed
+# by, and what another tool passes to `sup.run()`. Declared rather than derived
+# from the directory so a folder can be reorganised without breaking the HTTP
+# contract -- moving ALI_CBCT under a grouping folder is exactly that case.
+[tool.sadt]
+tool = true
+name = "AREG"
+
 [project.optional-dependencies]
 ios = ["pytorch3d"]
 

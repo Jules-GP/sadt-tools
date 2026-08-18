@@ -56,7 +56,7 @@ WORK_DIRNAME = ".aso_work"
 # a dynamic attribute on the supervisor: a typo in a string is greppable and
 # the call graph stays inspectable, where `sup.ALI(...)` is an AttributeError
 # fifteen minutes into a job.
-LANDMARK_TOOL = "ALI"
+LANDMARK_TOOL = "ALI_CBCT"
 
 
 class OrientationRun:

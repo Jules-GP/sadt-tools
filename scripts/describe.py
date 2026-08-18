@@ -20,6 +20,7 @@ this must run inside it -- so no tomllib and no match statement here.
 """
 
 import argparse
+import ast
 import hashlib
 import importlib
 import inspect
@@ -238,6 +239,71 @@ def check_default(name, kind, default, choices=None):
         return float(default)
     return default
 
+
+
+def supervised_calls(src_dir):
+    """Every tool name this tool asks the supervisor for, sorted.
+
+    Found by READING the source, not by importing it: the call sites are inside
+    branches that only a real run reaches, so there is nothing to introspect at
+    import time.
+
+    A tool cannot import another tool -- they are separate virtualenvs, which is
+    the whole reason the split exists -- so a call name is necessarily a free
+    string. That is a deliberate choice rather than an oversight, and it stays.
+    What it lacks is verification, and publishing the names is what lets the
+    SERVER supply it: a name matching no registered tool then fails at startup
+    instead of an hour into a registration.
+
+    Two spellings are resolved, because both are in real use:
+        sup.run("ASO", ...)                 a literal
+        sup.run(LANDMARK_TOOL, ...)         a module-level string constant
+
+    Anything else is refused. A name this cannot see is a name the server cannot
+    check, and a check with a hole in it is worse than no check -- it reads as
+    coverage.
+    """
+    names = set()
+    for path in sorted(Path(src_dir).rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError) as error:
+            raise SchemaError("{}: {}".format(path, error))
+
+        # Module-level `NAME = "value"`, which is how ASO spells it.
+        constants = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                    and isinstance(node.value.value, str):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = node.value.value
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            function = node.func
+            if not isinstance(function, ast.Attribute) or function.attr != "run":
+                continue
+            if not isinstance(function.value, ast.Name) or function.value.id != SUPERVISOR:
+                continue
+            if not node.args:
+                raise SchemaError(
+                    "{}:{}: {}.run() is called with no tool name.".format(
+                        path.name, node.lineno, SUPERVISOR)
+                )
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                names.add(first.value)
+            elif isinstance(first, ast.Name) and first.id in constants:
+                names.add(constants[first.id])
+            else:
+                raise SchemaError(
+                    "{}:{}: {}.run()'s tool name must be a literal or a module-level "
+                    "string constant, so the server can check it exists. Got {}.".format(
+                        path.name, node.lineno, SUPERVISOR, ast.dump(first)[:60])
+                )
+    return sorted(names)
 
 def is_supervisor(name, parameter, hints):
     """Whether this parameter is the supervisor, refusing near-misses.
@@ -503,6 +569,14 @@ def main(argv=None):
         module_name = args.module or find_package(src_dir)
         schema = {"name": tool_dir.name}
         schema.update(describe_run(load_run(src_dir, module_name), module_name))
+        # Only for a tool that takes a supervisor: for any other, an attribute
+        # called `.run` on something named `sup` would be a coincidence, and
+        # publishing a call list it cannot make would have the server check a
+        # relationship that does not exist.
+        if schema.get("supervisor"):
+            calls = supervised_calls(src_dir)
+            if calls:
+                schema["calls"] = calls
         schema["source_hash"] = source_hash(src_dir)
     except SchemaError as error:
         sys.stderr.write("{}: {}\n".format(tool_dir.name, error))

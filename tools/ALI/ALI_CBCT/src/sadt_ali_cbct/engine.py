@@ -27,9 +27,9 @@ import time
 
 import numpy as np
 
-from ..errors import ToolInputError
-from ..markups import MARKUPS_EXTENSION
-from ..markups import write as write_markups
+from .errors import ToolInputError
+from sadt_ali_common.markups import MARKUPS_EXTENSION
+from sadt_ali_common.markups import write as write_markups
 from . import catalog
 from . import preprocess
 from .agent import AGENT_FOV, MOVEMENT_COUNT, Agent, NotFound
@@ -302,7 +302,21 @@ def predict_landmarks(
                 scan_index=scan_index,
                 scan_total=len(scans),
             )
-            record["status"] = "ok"
+            # NOT unconditionally "ok". A per-landmark failure is recorded in
+            # `landmarks_failed` and does not raise -- deliberately, since a
+            # truncated field of view legitimately misses points and one hard
+            # landmark must not cost the other 57. But a scan on which EVERY
+            # agent failed placed nothing at all, and calling that a success is
+            # how a run that produced no coordinates reports 200.
+            if record["landmarks_found"]:
+                record["status"] = "ok"
+            else:
+                record["status"] = "failed"
+                record["error"] = (
+                    "no landmark could be placed on this scan: "
+                    f"{len(record['landmarks_failed'])} of "
+                    f"{len(runnable)} agent(s) failed to converge."
+                )
         except Exception as exc:
             # One unreadable or hopeless scan must not cost the other 199.
             logger.exception("ALI CBCT failed on one scan")
@@ -328,6 +342,19 @@ def predict_landmarks(
         raise RuntimeError(f"ALI produced no landmarks for any scan. First error: {first_error}")
 
     written = sum(len(record["landmarks_found"]) for record in scan_reports.values())
+    # The guard above counts SCANS; this one counts what the tool claims to
+    # have produced. They are not the same number, and the difference is the
+    # whole failure mode: before the check above learned to look at
+    # `landmarks_found`, a batch on which every agent failed reported every
+    # scan "ok" and returned 200 with no coordinates in it. Redundant today by
+    # construction, kept because the two guards answer different questions and
+    # only this one is about the output.
+    if not written:
+        raise RuntimeError(
+            f"ALI placed no landmark on any of the {len(scan_reports)} scan(s). "
+            f"{len(runnable)} landmark(s) were requested and the bundle had weights "
+            f"for all of them, so this is a failure of the search, not of the selection."
+        )
     never_found = sorted(
         {label for record in scan_reports.values() for label in record["landmarks_failed"]}
     )

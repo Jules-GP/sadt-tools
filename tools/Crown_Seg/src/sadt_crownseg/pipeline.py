@@ -27,6 +27,7 @@ import io
 import json
 import logging
 import os
+from pathlib import Path
 import shutil
 import time
 from argparse import Namespace
@@ -34,6 +35,17 @@ from argparse import Namespace
 from .errors import ToolInputError, ToolUnavailableError
 
 logger = logging.getLogger(__name__)
+
+
+# The tool's own name, derived rather than written down. `describe.py` publishes
+# `tool_dir.name` as the schema's `name`, so taking it from the same place is
+# what keeps a report and the schema from disagreeing -- which they already did:
+# this file said "CrownSeg" and "BatchDentalSeg" long after the folders were
+# renamed to the underscored convention, and nothing noticed because nothing
+# reads the field yet.
+#
+# `parents[2]` is <tool>/src/<package>/thisfile.py -> <tool>.
+TOOL_NAME = Path(__file__).resolve().parents[2].name
 
 # Extensions shapeaxi's reader handles and this tool therefore discovers.
 SURFACE_EXTENSIONS = (".vtk", ".stl")
@@ -390,7 +402,7 @@ def segment_crowns(
         raise RuntimeError("CrownSeg produced no segmented mesh for any input.")
 
     report = {
-        "tool": "CrownSeg",
+        "tool": TOOL_NAME,
         "array_name": array_name,
         "suffix": suffix,
         "numbering": "FDI" if fdi else "Universal",

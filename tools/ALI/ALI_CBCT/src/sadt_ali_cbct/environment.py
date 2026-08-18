@@ -14,7 +14,7 @@ import sys
 import numpy as np
 import SimpleITK as sitk
 
-from ..errors import ToolUnavailableError
+from .errors import ToolUnavailableError
 
 from .brain import import_torch
 
