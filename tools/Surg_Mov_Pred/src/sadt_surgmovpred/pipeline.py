@@ -26,6 +26,7 @@ MODEL_FILENAME = "stacking_package.pkl"
 
 def clean_name(name: str) -> str:
     """Cleans a column name so it exactly matches the training-time format."""
+    original = name
     try:
         name = str(name).strip()
         name = re.sub(r'[\r\n\t]', ' ', name)
@@ -47,9 +48,16 @@ def clean_name(name: str) -> str:
             name = f'f_{name}'
 
         return name or 'f_unnamed'
-    except Exception:
-        logger.exception(f"Error cleaning column name '{name}'")
-        return 'f_unnamed'
+    except Exception as exc:
+        # NOT a fallback name. Two columns that both failed here became the
+        # same `f_unnamed`, so one silently shadowed the other and feature
+        # resolution then matched the wrong measurement or none -- a wrong
+        # prediction rather than a missing one, which is the worse of the two
+        # for a clinician.
+        raise ValueError(
+            f"Could not derive a feature name from the column {original!r}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 # Common naming conventions used by different users for the patient identifier column.
@@ -238,6 +246,20 @@ def predict_all_targets(df, packages: dict):
 
             except Exception:
                 logger.exception(f"Error predicting target '{target_name}'")
+
+        if not predictions_by_target:
+            # The loading stage already refuses to continue when NO package
+            # could be loaded; this is the same guard one stage later, and the
+            # missing half of it. Loading every model and predicting nothing
+            # still wrote predictions_outputs.xlsx and .csv -- real files, with
+            # the patient index and not one prediction column -- and reported
+            # success. A guard has to count what the tool claims to have
+            # produced, not the objects it walked past.
+            raise RuntimeError(
+                f"None of the {len(packages)} loaded model(s) produced a prediction. "
+                "The measurements file is most likely missing the features they were "
+                "trained on; the per-target errors are in the log."
+            )
 
         results_df = pd.DataFrame(predictions_by_target, index=df_cleaned.index)
 
