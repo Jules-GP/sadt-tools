@@ -43,9 +43,40 @@ mv src/sadt_template src/sadt_amasss
 Then edit `pyproject.toml` (`name`, `requires-python`, `dependencies`), and
 delete the placeholder pipeline.
 
-**The directory name IS the tool name.** The server looks up a tool's
-interpreter at `<TOOLS_DIR>/<tool name>/.venv/bin/python`, so the two cannot
-differ. The convention:
+**Declare the tool name in `[tool.sadt]`.** It is the API identity: what a
+client sends, what `deployment.toml` is keyed by, and what another tool passes
+to `sup.run()`.
+
+```toml
+[tool.sadt]
+tool = true
+name = "Crown_Seg"
+```
+
+The section is also what makes the directory a tool at all — a `pyproject.toml`
+without it is a plain package, importable and installable but never discovered
+or served, which is how `tools/ALI/common/` and `testkit/` sit beside tools
+without becoming ones.
+
+Resolution order, most explicit first:
+
+1. `[tool.sadt] name`, when declared;
+2. otherwise the directory name, with acronyms preserved as today — `ALI`,
+   `ASO`, `AMASSS`.
+
+A new tool should declare it rather than lean on the fallback, so the API name
+is a **decision** and not an accident of directory casing.
+
+**The directory must still be NAMED after the tool**, even when the name is
+declared: the interpreter is looked up at
+`<TOOLS_DIR>/[<group>/]<tool name>/.venv/bin/python`, so a folder called
+anything else registers a tool that cannot be run. What declaring the name buys
+is that the tool's DEPTH may change — `ALI_CBCT` moved under the `ALI/` grouping
+folder and kept its name — and that renaming a folder without meaning to change
+the API name fails at startup instead of silently renaming the tool clients ask
+for.
+
+The naming convention:
 
 - an acronym stays as it is — `ALI`, `ASO`, `AMASSS`;
 - anything else is capitalised words joined by underscores —
