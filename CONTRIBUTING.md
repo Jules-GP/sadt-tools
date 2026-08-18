@@ -126,6 +126,17 @@ any that names an argument the signature does not take, an option it does not
 offer, or a value a condition could never match. Absent is fine — the schema is
 then exactly what it was before.
 
+The set is a **joint** decision with the server: a key it does not name is
+dropped silently on the way through — that happened once, and was invisible
+from both ends — so adding a seventh here does nothing until it is added there
+too. One is pending in that direction: **`options_when`**,
+`{other_arg: {value: [options]}}`, which narrows a choice argument's own
+options instead of hiding the whole field. The server accepts it and the client
+renders it; `LAYOUT_KEYS` does not emit it. It is what `AREG` wants for its
+three automation modes — all meaningful, none of which offers "Oriented +
+Fully-Automated" on IOS, so today the combo box offers a mode that fails at the
+end of a run.
+
 **Derive it, never restate it.** This replaces the `ArgSpec` tables, and those
 drifted precisely because they listed options by hand: a landmark added to the
 catalog was published by the schema and reachable through no tab at all.
@@ -178,7 +189,14 @@ def run(scans: Path, reference: Path, output_dir: Path, *, sup=None) -> Path:
   calling it and failing halfway. A `sup` that is positional or annotated is a
   hard error, not a schema entry.
 - It is **duck-typed**. Never import a supervisor type — that would need a
-  package shared with the server, which is what the split removes.
+  package shared with the server, which is what the split removes. Three
+  implementations produce the same shape and a tool cannot tell them apart: the
+  server's (`server/execution/runner.py`), `scripts/run_tool.py`, and the dozen
+  lines wrapping `sadt-testkit` in `tools/ASO/tests/`.
+- **A cycle is refused by name, not by depth.** The server carries the chain of
+  tools already running above a call, so asking for one of them fails at once
+  and names the chain. The depth cap (5) is only a backstop for a chain that
+  grows without repeating; the deepest real one is `AREG → ASO → ALI_CBCT`.
 - Five members, nothing more: `sup.run(tool, **params)`, `sup.out`, `sup.tmp`,
   `sup.progress(fraction, message)`, `sup.log(message)`.
 - `sup.run("ALI", ...)`, never `sup.ALI(...)`. A typo in a string is greppable;
@@ -211,6 +229,81 @@ byte-for-byte identical wherever you can; the Slicer-specific scaffolding around
 it (Qt widgets, queue tables, RAM watchdogs, progress dialogs) is not part of
 the algorithm and does not come across. If you have to change logic, say so
 explicitly in the PR description and in the tool's README.
+
+### Duplicate the implementation, share the formats
+
+Two tools that need the same code usually get **two copies**. That is
+deliberate and it goes against the usual instinct: `nnunet_runner.py` exists
+twice, in AMASSS and in BatchDentalSeg, because each tool is its own virtualenv
+and importing across them would make one tool's missing dependency take both
+out of the registry. A copy costs a divergence; a coupling costs an entire
+class of failure. The copy usually wins.
+
+**The exception is anything that defines the shape of bytes leaving this
+repository.** File formats, extension vocabularies, on-disk layouts — anything
+a third party reads or writes. Those go in a shared package, because a
+divergence there does not fail, it produces output that one consumer accepts
+and another silently mis-reads.
+
+The example that settles it. Before the split, ALI's two engines both wrote
+Slicer markups files, and both set `display.visibility: false` in them. That
+switches the markups display node off: Slicer loads the file, builds the node,
+and draws nothing. The bug was invisible for as long as nobody opened a result
+outside the module, and it was in **both** copies — one mistake, written twice,
+because the format was duplicated rather than shared. It is now in
+`tools/ALI/common/`, imported by `ALI_CBCT` and `ALI_IOS` alike, along with the
+table of which file extensions count as a CBCT volume and which as a surface
+(the pre-port CLIs disagreed about `.stl`, so it was accepted by the UI and
+silently ignored by the CLI).
+
+What stays duplicated even between two halves of one tool: `errors.py`. Errors
+cross the process boundary by exception class **name** — the runner records the
+name, the server maps it to an HTTP status — so a shared base class is not
+merely unnecessary, it is not the mechanism.
+
+A shared package must declare **no dependencies**. It installs into several
+tool environments whose pins are deliberately incompatible, and anything it
+pulled in would have to be satisfiable by all of them at once — which is the
+constraint this repository exists to remove.
+
+### `[tool.uv.sources]` only applies to DECLARED dependencies
+
+A source says *where* a package comes from. It does not make the package a
+dependency. Name it in a source and forget to name it in `dependencies`, and uv
+resolves without complaint, installs nothing, and the failure arrives at
+runtime as a `ModuleNotFoundError` or — worse — as a *different* build of the
+package pulled in transitively from PyPI.
+
+It has caught three different things in this repository, which is what makes it
+a rule rather than an anecdote:
+
+| package | left undeclared | what happened |
+|---|---|---|
+| `pytorch3d` | pulled transitively by `shapeaxi` | source ignored, *"no wheels with a matching Python version tag"* |
+| `torchvision` | pulled transitively by the torch stack | came from PyPI, built against the default torch instead of cu128 — imports fine, then `RuntimeError: operator torchvision::nms does not exist` |
+| `sadt-ali-common` | a path dependency of ALI_CBCT/ALI_IOS | installed nothing at all; `ModuleNotFoundError` on first import |
+
+The rule: **if it has a `[tool.uv.sources]` entry, it must also be in
+`[project] dependencies` (or in an extra).** Transitive is not enough, and the
+two failure modes it produces — a missing module, and a right-version wrong-build
+C extension — look nothing like each other, so recognising one does not help you
+recognise the next.
+
+### A directory is a tool when its pyproject says so
+
+Discovery keys on a `[tool.sadt]` section, not on the presence of a
+`pyproject.toml` and not on where the directory sits:
+
+```toml
+[tool.sadt]
+tool = true
+```
+
+A shared path dependency (`tools/ALI/common/`, `testkit/`) has a
+`pyproject.toml` — it must, to be installable — and no `[tool.sadt]`, so it is
+importable, installable, and never discovered or served. This is what lets a
+grouping folder like `tools/ALI/` hold `ALI_CBCT/`, `ALI_IOS/` and `common/`
+side by side. Single-engine tools stay flat: there is no `tools/AMASSS/AMASSS/`.
 
 ## 5. Pin what upstream actually used
 
