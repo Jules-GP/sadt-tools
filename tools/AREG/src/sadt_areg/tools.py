@@ -48,7 +48,7 @@ _ADVICE = {
         "Segment the crowns yourself -- the meshes need a per-point tooth-label array "
         "-- and use Semi-Automated mode instead."
     ),
-    "ALI": (
+    "ALI_IOS": (
         "Send the 13 mucogingival landmarks per lower scan in 'mgl_landmarks' instead."
     ),
 }
@@ -179,13 +179,16 @@ def predict_mucogingival(sup, mesh_dir: str, model_path: str = "") -> str:
     here. ALI restricts it to the mandible itself, so an upper arch in the batch
     costs nothing.
     """
-    logger.info("AREG: asking 'ALI' for mucogingival landmarks")
+    logger.info("AREG: asking 'ALI_IOS' for mucogingival landmarks")
     parameters = {
         "input": mesh_dir,
-        "output_dir": _output(sup, "ALI"),
-        "ios_networks": ["Mucogingival"],
+        "output_dir": _output(sup, "ALI_IOS"),
+        # `networks`, not `ios_networks`: the split gave the intraoral engine its
+        # own schema, and an argument that only ever applied to one modality
+        # stopped needing the prefix that told them apart.
+        "networks": ["Mucogingival"],
         "prediction_ID": "MG_Pred",
     }
     if model_path:
         parameters["model"] = model_path
-    return _returned(sup.run("ALI", **parameters))
+    return _returned(sup.run("ALI_IOS", **parameters))
