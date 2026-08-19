@@ -1,7 +1,7 @@
 # sadt-areg-ios
 
 Registers a follow-up intraoral scan onto its baseline, by ICP on a patch of the
-arch that does not move with growth or treatment — the palate, or the band
+arch that does not move with growth or treatment -- the palate, or the band
 around the mucogingival line.
 
 Split out of the former single `AREG`; see `../common/README.md` for what the
@@ -12,7 +12,7 @@ two engines still share and why.
 Registering the same pair twice, with the same code and the same weights,
 does not give the same mesh. Measured on upstream's own `AREG_test_scans`
 (`A2_UpperT1.vtk` / `A2_UpperT2.vtk`, 75 867 points, 57.5 mm across), on the
-registered T2 — the mesh the ICP actually moves:
+registered T2 -- the mesh the ICP actually moves:
 
 | comparison | mean | p95 | max | identical points |
 |---|---|---|---|---|

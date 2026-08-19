@@ -1,13 +1,13 @@
 """How a client should lay this tool's panel out. Presentation only.
 
-Nothing here changes what `run()` accepts — `describe.py` merges these hints
+Nothing here changes what `run()` accepts -- `describe.py` merges these hints
 into the published schema and refuses any that name an argument or an option
 the signature does not offer. Delete this file and the tool still works; the
 panel just gets worse.
 
 **Everything is DERIVED, never restated.** That is the whole difference from the
 `ArgSpec` tables this replaces. Those listed the anatomical tabs by hand, and a
-landmark added to the catalog was then reachable through no tab at all — offered
+landmark added to the catalog was then reachable through no tab at all -- offered
 by the schema, invisible in the UI. Here the tabs are computed from
 `catalog.GROUP_LABELS`, so a landmark added there appears in its tab with no
 edit here and no client release.

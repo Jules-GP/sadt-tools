@@ -1,7 +1,7 @@
 # Test data
 
 Nothing is committed here. The model bundle is 2.1 GB and `MG_test_scan.nii.gz`
-is a real CBCT — patient data, which never goes into this repository.
+is a real CBCT -- patient data, which never goes into this repository.
 
 Everything the CI suite needs, it builds: `test_run.py` writes 8³ synthetic
 volumes and stubs `nnunet_runner.predict_folder`, so input discovery, model

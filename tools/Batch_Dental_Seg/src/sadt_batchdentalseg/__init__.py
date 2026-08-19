@@ -32,7 +32,7 @@ def run(
             PediatricDentalSeg (paediatric, the same five), NasoMaxillaDentSeg
             (six, maxilla split from the upper skull) or UniversalLab (every
             tooth in Universal numbering). Pairing one bundle with another's
-            labels is impossible by construction — the choice is one thing.
+            labels is impossible by construction -- the choice is one thing.
         output_dir: Where results are written, one file per scan plus
             `BatchDentalSeg_report.json`. Nothing is written outside it.
         separate_segments: Also write one binary file per label the network
@@ -49,7 +49,7 @@ def run(
 
     Returns:
         The output directory, holding the segmentations and the run report. The
-        report carries the model's label table — the segmentation is a volume
+        report carries the model's label table -- the segmentation is a volume
         of integers, and without that table they mean nothing.
     """
     # torch, nnunetv2, SimpleITK and numpy are imported inside the pipeline: CI

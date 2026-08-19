@@ -1,6 +1,6 @@
 """How a client should lay this tool's panel out. Presentation only.
 
-Nothing here changes what `run()` accepts — `describe.py` merges these hints
+Nothing here changes what `run()` accepts -- `describe.py` merges these hints
 into the published schema and refuses any that name an argument or an option
 the signature does not offer. Delete this file and the tool still works; the
 panel just gets worse.
@@ -11,7 +11,7 @@ all 32 teeth, whichever mode is selected, and a clinician has to know which half
 to ignore. The conditions below are the old Slicer module's four-page
 `QStackedWidget` expressed as data instead of as widget code.
 
-**Everything is DERIVED, never restated** — the tabs come from `catalogs`, so a
+**Everything is DERIVED, never restated** -- the tabs come from `catalogs`, so a
 landmark or a tooth added there appears in its tab with no edit here. That is
 the difference from the `ArgSpec` tables this replaces, which listed options by
 hand and drifted from the code they described.

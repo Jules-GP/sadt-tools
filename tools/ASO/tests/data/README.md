@@ -1,7 +1,7 @@
 # Test data
 
 Nothing is committed here. The suite builds its own 16³ synthetic CBCT volumes
-with SimpleITK, its own labelled meshes with VTK, and its own landmark sets —
+with SimpleITK, its own labelled meshes with VTK, and its own landmark sets --
 seven points in a plausible skull-ish arrangement, no three collinear, so the
 coarse alignment can always find a usable triplet. A known rotation is applied
 and the registration has to recover it.
@@ -26,7 +26,7 @@ scripts/setup-models.sh --tool ALI   # from a slicer-remote-tool-server checkout
 
 The chain test is pointed at its data by environment variable, and uses a **real
 scan**: the synthetic 16³ volume the rest of the suite builds is not a head, and
-the landmark agent converges on nothing in it — a fact about the fixture, not
+the landmark agent converges on nothing in it -- a fact about the fixture, not
 about the chain.
 
 ```bash
@@ -37,12 +37,12 @@ uv run pytest -m "gpu and models"
 
 It skips rather than fails when either is unset, or when `tools/ALI` has no
 venv. It drives ASO through `scripts/run_tool.py` rather than
-`sadt_testkit.run_tool`, because only the former supplies a supervisor — the
+`sadt_testkit.run_tool`, because only the former supplies a supervisor -- the
 latter is the server runner's contract, which does not.
 
 Only the seven landmarks in `DEFAULT_CBCT_LANDMARKS` are asked for, so a partial
 bundle carrying `Ba`, `S`, `N`, `RPo`, `LPo`, `ROr` and `LOr` at both scales is
-enough — about 300 MB rather than 4.7 GB.
+enough -- about 300 MB rather than 4.7 GB.
 
 ## Reference bundles
 
@@ -57,7 +57,7 @@ weights, and the reference scan is not read. The two published bundles carry
 
 `run()`'s defaults are the first set. Choosing the second without changing
 `cbct_landmarks` is refused up front with a message naming what the reference
-actually offers — the failure that used to be forty identical per-patient ones.
+actually offers -- the failure that used to be forty identical per-patient ones.
 
 Write manual runs into the repository's gitignored `output/` directory, never
 next to the inputs.

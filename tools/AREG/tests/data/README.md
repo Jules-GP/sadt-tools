@@ -2,7 +2,7 @@
 
 Nothing is committed here. The suite builds its own 48³ synthetic phantoms with
 SimpleITK, moves them by a known rigid transform, and checks the recovered
-transform against it — `itk-elastix` is a wheel and fast enough on a phantom
+transform against it -- `itk-elastix` is a wheel and fast enough on a phantom
 that the CBCT registration is exercised for real rather than mocked.
 
 That covers all 88 tests. The IOS patch network is stubbed; it needs pytorch3d
@@ -20,7 +20,7 @@ uv run pytest -k arguments_it_sends
 ```
 
 Running an actual chain needs more than this repository holds: the AMASSS
-bundle, an orientation reference, and — for the IOS half — the `ios` extra plus
+bundle, an orientation reference, and -- for the IOS half -- the `ios` extra plus
 a segmented lower arch. See `../../ALI/tests/data/README.md` for the container
 recipe that avoids compiling pytorch3d.
 

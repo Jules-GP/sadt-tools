@@ -51,7 +51,7 @@ def patient_and_jaw(filename: str) -> tuple:
     **The jaw token may also come first**, and that is not a corner case: the
     published IOS reference bundle is `Upper_gold.vtk` / `Lower_gold.vtk`.
     Requiring something before the token rejected the whole bundle with "no mesh
-    whose name says which jaw it is" — verified against
+    whose name says which jaw it is" -- verified against
     HUTIN1/ASO v1.0.0 Gold_file.zip. When nothing precedes the token, what
     follows it is the identifier rather than decoration.
 

@@ -15,8 +15,8 @@ kill, and `peak_vram_bytes` instrumentation). Read-only inspection.
 three gaps in order of how much they mattered:
 
 - **The server injects a supervisor.** `server/execution/runner.py` builds one
-  when `run()` declares `*, sup` — keyword-only and unannotated, the same rule
-  `describe.py` uses — and `sup.run(tool, **params)` re-enters that same file
+  when `run()` declares `*, sup` -- keyword-only and unannotated, the same rule
+  `describe.py` uses -- and `sup.run(tool, **params)` re-enters that same file
   with the sibling's interpreter. Five members, duck-typed, exactly as §5 asked
   for. `ASO`'s fully-automated CBCT mode and all of `AREG` work under it.
 - **`supervisor` is a recognised top-level key**, not an ignored one
@@ -26,22 +26,22 @@ three gaps in order of how much they mattered:
   `server/registry/conventions.py` derives from argument NAMES what
   `deployment.toml` used to have to state, `server/deployment.toml` is an empty
   file of comments, and `DATA/` is resolved by the tool's name with underscores
-  stripped — so `Batch_Dental_Seg` reads `DATA/BatchDentalSeg/` with nothing
+  stripped -- so `Batch_Dental_Seg` reads `DATA/BatchDentalSeg/` with nothing
   written down. The lowercase-vs-capitalised mismatch this document warned
   about no longer exists on either side.
 
 **The presentation keys travel.** `label`, `section`, `ui`, `groups`,
 `visible_when` and `hidden` are published through `GET /tools` and read by the
-Slicer client. There was a period where the server dropped them silently —
-this repository published them, the client read them, and nothing arrived — so
+Slicer client. There was a period where the server dropped them silently --
+this repository published them, the client read them, and nothing arrived -- so
 each key is now named explicitly in `schema_tool.py` rather than passed through
 wholesale. **Adding a seventh key needs a one-line change on the server**, and
 until it lands the key does not exist as far as any client is concerned.
 
 There is one such key already: **`options_when`**, which the server accepts and
 the client renders, and which `describe.py`'s `LAYOUT_KEYS` does not emit. It
-narrows a choice argument's own options instead of hiding the whole field —
-`{"modality": {"IOS": ["Semi-Automated", "Fully-Automated"]}}` — and it exists
+narrows a choice argument's own options instead of hiding the whole field --
+`{"modality": {"IOS": ["Semi-Automated", "Fully-Automated"]}}` -- and it exists
 because `AREG`'s three automation modes are all meaningful while IOS has no
 "Oriented + Fully-Automated". Without it the combo box offers a mode that fails
 at the end of a run. **This is the one live divergence between the two
@@ -59,7 +59,7 @@ repositories.**
   look exactly one level below `TOOLS_DIR`, so `tools/ALI/ALI_CBCT` is
   discovered as neither `ALI` nor `ALI_CBCT`. Only the supervisor's own lookup
   descends into a group. **The ALI split therefore needs either a flattening
-  step when the tools are staged, or two more lookups on the server** —
+  step when the tools are staged, or two more lookups on the server** --
   whichever is chosen has to be chosen deliberately, because the failure is a
   tool that simply does not appear in `GET /tools`.
 - **VRAM is counted, not budgeted.** `MAX_CONCURRENT_GPU_JOBS` is a job
@@ -77,7 +77,7 @@ A tool that hosts nothing gets this for free, but two names are load-bearing:
 | `model`, `*_model`, `*_reference` | a name picked from `DATA/<tool>/models/` |
 | any other `path` | a file the caller may upload |
 
-`ASO` shipped `landmark_models` — plural — which misses `*_model` by one letter
+`ASO` shipped `landmark_models` -- plural -- which misses `*_model` by one letter
 and would have put a file picker in front of a 4.7 GB weight bundle. It is
 `landmark_model` now, with a test guarding it. Check a new tool's path
 arguments against this table before opening the PR; nothing else will.
@@ -88,7 +88,7 @@ repositories are written against.
 ## 1. Discovery
 
 `scripts/describe.py` in this repository turns a tool's `run()` signature into
-the JSON the server publishes. Run it with the **tool's own interpreter** —
+the JSON the server publishes. Run it with the **tool's own interpreter** --
 importing a tool needs the tool's dependencies:
 
 ```bash
@@ -97,7 +97,7 @@ importing a tool needs the tool's dependencies:
 
 It is dependency-free and stays Python 3.9-compatible so it can run inside any
 tool venv, including one pinned to an old interpreter. It exits **2** with a
-message on stderr for anything it cannot represent, and prints nothing — treat a
+message on stderr for anything it cannot represent, and prints nothing -- treat a
 non-zero exit as "this tool is not loadable" and say so, rather than serving a
 partial schema.
 
@@ -122,7 +122,7 @@ partial schema.
 }
 ```
 
-**`name` is the folder name**, spelled as a client sends it — `AMASSS`,
+**`name` is the folder name**, spelled as a client sends it -- `AMASSS`,
 `ALI_CBCT`, `Batch_Dental_Seg`. It is not lowercased anywhere: the server looks
 up the interpreter at `<TOOLS_DIR>/<name>/.venv/bin/python`, and a Slicer
 module holds the same string in `TOOL_NAME`.
@@ -143,7 +143,7 @@ Three things to build against:
   `ui`, `groups`, `visible_when` and `hidden` are merged in from the tool's
   `layout.py`; the server publishes them untouched and `validate()` ignores
   every one. A key the server does not name is silently dropped, so the set is
-  a joint decision rather than something either side can extend alone —
+  a joint decision rather than something either side can extend alone --
   `options_when` is currently accepted by the server and not emitted here.
 
 **Argument order is the signature's order.** Render forms in it.
@@ -155,13 +155,13 @@ Three things to build against:
 ```
 
 `uv sync` installs each tool into its own venv, so `import sadt_<name>` works
-directly — no `sys.path` juggling needed, though adding `/tools/<name>/src`
+directly -- no `sys.path` juggling needed, though adding `/tools/<name>/src`
 first is harmless and makes the runner work against an unsynced checkout too.
 
 `server/execution/runner.py` implements this, and
 [`testkit/src/sadt_testkit/_driver.py`](../testkit/src/sadt_testkit/_driver.py)
 in this repository is the same contract, ~60 lines, stdlib-only. The two were
-written independently and agree — same coercion by annotation, same result
+written independently and agree -- same coercion by annotation, same result
 file, same error-class-name convention. **Keep them in step deliberately**: the
 driver is what every tool's integration tests run against, so if they drift, the
 tests here pass while production fails.
@@ -172,7 +172,7 @@ Two details from it worth carrying over:
   must become `Path` for parameters annotated `Path` (or `list[Path]`).
   `typing.get_type_hints(run)` is how the driver decides.
 - **An empty string is ABSENCE and must stay a string.** `Path("")` is
-  `PosixPath(".")` — the current directory, and truthy — so coercing the
+  `PosixPath(".")` -- the current directory, and truthy -- so coercing the
   "not supplied" default of an optional path hands the tool a real directory.
   This is not hypothetical: it made `ASO` read an unset `landmarks=""` as a
   supplied landmark folder and walk the entire checkout, `.venv` included.
@@ -184,7 +184,7 @@ Two details from it worth carrying over:
   ```
 
   `run_tool.py` and the testkit driver both do this; the server's runner must
-  too. It is the price of `describe.py` refusing `None` defaults — an optional
+  too. It is the price of `describe.py` refusing `None` defaults -- an optional
   path has no other way to say "unset".
 - **Never parse the result off stdout.** These tools print progress bars, nnUNet
   banners and shapeaxi chatter. The driver writes the result to a file whose path
@@ -193,12 +193,12 @@ Two details from it worth carrying over:
 
 `run()` returns a `Path` or a `dict[str, Path]`; `returns` in the schema says
 which. Today: `surgmovpred` returns `dict[str, path]` (`excel` and `csv`), the
-others return a `path` — the output directory they were given.
+others return a `path` -- the output directory they were given.
 
 ## 3. Work that moved to the server
 
 Each of these used to happen inside a tool and now happens nowhere unless the
-server does it. **All of them are already implemented** — the file references
+server does it. **All of them are already implemented** -- the file references
 are in the status table above. They are kept here because they are the reasoning
 behind the code, and the first person to touch that code will want it.
 
@@ -217,8 +217,8 @@ passes a real file or directory. Two behaviours have to come with it:
 
 **Implemented**: `settings.MAX_CONCURRENT_GPU_JOBS` (default 1), one counter
 **across** tools, held in `execution/dispatch.py`. Every tool used to hold a
-`threading.BoundedSemaphore` — `AMASSS_MAX_GPU_JOBS`, `BATCHDENTALSEG_MAX_GPU_JOBS`,
-`CROWNSEG_MAX_GPU_JOBS`, `ALI_MAX_GPU_JOBS`, all defaulting to 1 — because every
+`threading.BoundedSemaphore` -- `AMASSS_MAX_GPU_JOBS`, `BATCHDENTALSEG_MAX_GPU_JOBS`,
+`CROWNSEG_MAX_GPU_JOBS`, `ALI_MAX_GPU_JOBS`, all defaulting to 1 -- because every
 tool shared one server process. A tool is now its own process, so an in-process
 semaphore would cap nothing and they have all been removed. An AMASSS run and a
 `Crown_Seg` run compete for the same device, which is why the counter cannot be
@@ -227,7 +227,7 @@ per tool.
 **A run is assumed to want the card** unless it declares `device` and resolves
 it to a CPU value. That default is deliberately the strict one: a tool that
 imports torch without declaring `device` would otherwise never queue at all.
-The consequence for this repository is concrete — **a GPU tool must declare
+The consequence for this repository is concrete -- **a GPU tool must declare
 `device`**, or every run of it, CPU or not, takes a GPU slot; and a CPU-only
 tool that declares one gets to say so and never queues.
 
@@ -238,7 +238,7 @@ at once), and the counter is jobs rather than memory.
 
 ### Creating and owning the output directory
 
-`output_dir` is a required argument on every tool. Create it (or let the tool —
+`output_dir` is a required argument on every tool. Create it (or let the tool --
 they all `mkdir(parents=True, exist_ok=True)`), pass it, and archive what comes
 back. Tools write **only** there; each has a test asserting it.
 
@@ -249,20 +249,20 @@ run crashed.
 ### Resolving model weights
 
 Tools no longer touch `data_store` or `settings.CROWNSEG_MODEL`. The server
-resolves the name and passes a path — but **what kind of path differs per tool**:
+resolves the name and passes a path -- but **what kind of path differs per tool**:
 
 | Tool | `model` is | Note |
 |---|---|---|
 | `surgmovpred` | a folder | every `stacking_package.pkl` under it is loaded, recursively |
 | `amasss` | the bundle root | one subfolder per structure code (`MAND/`, `MAX/`, …); a single wrapper folder is descended into |
-| `batchdentalseg` | **the bundle folder itself** | its *name* selects the model and its label table — see below |
+| `batchdentalseg` | **the bundle folder itself** | its *name* selects the model and its label table -- see below |
 | `crownseg` | a `.pth` file | not a folder |
 
 **`batchdentalseg` is the sharp edge**: the folder's basename must equal a key in
 its `catalogs.MODELS` (`DentalSegmentator`, `PediatricDentalSeg`,
 `NasoMaxillaDentSeg`, `UniversalLab`), which must in turn equal the folder
 `scripts/data-manifest.yml` downloads that bundle into. The server-side test that
-enforced that has no home any more — this repository cannot read the manifest.
+enforced that has no home any more -- this repository cannot read the manifest.
 
 **This no longer needs a `deployment.toml`.** Tool directories here are the
 tool's name as a client sends it (`AMASSS`, `Batch_Dental_Seg`, `Crown_Seg`,
@@ -274,7 +274,7 @@ a `data_dir` line.
 
 ### Configuring logging
 
-Tools use a plain module logger and attach no handlers — a library that
+Tools use a plain module logger and attach no handlers -- a library that
 configures logging takes the decision away from whatever runs it. The runner owns
 handlers, levels and formatting. Without that, tool logs go nowhere.
 
@@ -290,7 +290,7 @@ their previous defaults. The server passes them only to override:
 | `settings.AMASSS_GPU_RESAMPLING` | `gpu_resampling` (amasss) | `true` |
 | `settings.BATCHDENTALSEG_TILE_STEP_SIZE` | `tile_step_size` (batchdentalseg) | `0.5` |
 | `settings.CROWNSEG_NUM_WORKERS` | `num_workers` (Crown_Seg) | `2` |
-| `settings.*_MAX_GPU_JOBS` | — | gone; see "Capping GPU work" |
+| `settings.*_MAX_GPU_JOBS` | -- | gone; see "Capping GPU work" |
 
 `tile_step_size` and `gpu_resampling` **change the segmentation**. The tools
 record what was used in their run report, so a mask stays reproducible.
@@ -317,7 +317,7 @@ should write into its result file:
 - anything else → **500**, message not passed through.
 
 If you would rather not match on names, the alternative is a `type` field the
-tools set explicitly — but that is a shared convention either way, and names are
+tools set explicitly -- but that is a shared convention either way, and names are
 already the convention.
 
 ## 5. Sequencing tools
@@ -337,13 +337,13 @@ naming `Crown_Seg`, rather than failing per mesh.
 
 **`ASO` fully-automated CBCT needs `ALI` from the middle of its own run.** It
 recentres each scan, predicts landmarks **on the centred volumes**, then
-registers — the order the Slicer chain used (`PRE_ASO_CBCT` before `ALI_CBCT`).
+registers -- the order the Slicer chain used (`PRE_ASO_CBCT` before `ALI_CBCT`).
 Running ALI first and handing ASO the markups reorders those two steps.
 
 That reordering *ought* to be exact: recentring resamples onto a grid shifted by
 the same offset, so the voxel array is untouched and only the origin metadata
 moves. But ALI's `physical_position` takes `abs(origin / spacing)`, which does
-not commute with moving the origin — [issue #11]. Rather than bet a clinical
+not commute with moving the origin -- [issue #11]. Rather than bet a clinical
 result on it, ASO calls ALI where it always ran.
 
 So ASO takes a **supervisor**, and the server provides one
@@ -356,8 +356,8 @@ predictions = sup.run("ALI_CBCT", input=centered_root, model=bundle, output_dir=
 Every requirement this section used to list is met, and each was met the way it
 asked:
 
-- **Five members, duck-typed** — `run(tool, **params)`, `out`, `tmp`,
-  `progress(fraction, message)`, `log(message)` — passed as the keyword-only
+- **Five members, duck-typed** -- `run(tool, **params)`, `out`, `tmp`,
+  `progress(fraction, message)`, `log(message)` -- passed as the keyword-only
   `sup`. Nothing is imported across the two repositories.
   [`scripts/run_tool.py`](../scripts/run_tool.py) produces the same shape, and
   a tool cannot tell the three implementations apart.
@@ -368,12 +368,12 @@ asked:
 - **Absolute paths and a neutral working directory.** Each nested call gets its
   own job directory under `<job>/sup/NN_<tool>/`, and runs with that as `cwd`.
 - **The scratch is `sup.tmp`**, a sibling of `output/` inside the job directory,
-  removed with it — so the tool stays held to writing only under `output_dir`.
+  removed with it -- so the tool stays held to writing only under `output_dir`.
 - **`sup.run` returns what the tool returned**, a `Path` or a
   `dict[str, Path]`, reconstructed from the callee's `result.json`.
 - **Concurrency is answered by not queueing at all.** A nested call is a
   subprocess of its parent, so it never re-enters the server's admission queue
-  and cannot wait for a slot the parent is holding — the deadlock this section
+  and cannot wait for a slot the parent is holding -- the deadlock this section
   described is structurally impossible rather than mitigated. The cost is that
   nested work is invisible to `MAX_CONCURRENT_GPU_JOBS`.
 
@@ -392,20 +392,20 @@ errors a tool author will read:
 `describe.py` publishes `"supervisor": true` for a tool that takes one, and the
 server now reads that key. Passing `landmarks` (a folder of `.mrk.json`) still
 makes fully-automated CBCT work with no supervisor at all, which is what lets
-ASO be used standalone — keep that door open in every tool that takes a `sup`.
+ASO be used standalone -- keep that door open in every tool that takes a `sup`.
 
 [issue #11]: https://github.com/Jules-GP/sadt-tools/issues/11
 
 ## 6. What was deleted, and what was not
 
-This happened, tool by tool, each after its PR merged *here* — never before,
+This happened, tool by tool, each after its PR merged *here* -- never before,
 because the server kept working off its own copy until this one was proven.
 
 **Gone from the server**: every clinical tool. `server/tools/` holds
 `Test_Tool` and `Example_Tool` (in-process demos of the old path, kept
 deliberately), a `_dispatch_probe` fixture, and a parked `_AREG` kept only for
 its history. The server's own suite went from 461 tests to 220 in the same
-movement — a packaged tool's tests belong to that tool and run in ITS
+movement -- a packaged tool's tests belong to that tool and run in ITS
 interpreter.
 
 **Still there, and for a reason**: `base.py`'s `Tool`, `ArgSpec`, `Selection`,
@@ -417,8 +417,8 @@ That layer is not legacy; it is the shape everything becomes. What is legacy is
 the *import* half of discovery, and the `SADT_DISPATCH_MODE` flag, both of which
 now only concern the two demos.
 
-`requirements-api.txt` is what the API actually needs — fastapi, uvicorn,
-python-multipart, pydantic-settings — and a test asserts it stays that way.
+`requirements-api.txt` is what the API actually needs -- fastapi, uvicorn,
+python-multipart, pydantic-settings -- and a test asserts it stays that way.
 `requirements.txt` is still the heavy one for a dev checkout, which is the last
 piece of this list outstanding.
 
@@ -429,8 +429,8 @@ piece of this list outstanding.
   but in the whole 2.0.x line the class lives in `shapeaxi.saxi_nets_lightning`.
   The pre-port tool fails the same way on the deployed image. This repository
   carries a two-line workaround (`_restore_moved_class`) guarded so it vanishes
-  when upstream fixes it. Anything downstream of crown segmentation — ALI's IOS
-  half, the IOS modes of ASO/AREG/FlexReg — has been broken on the current image.
-- **Disk.** Each torch venv is 7.2–7.7 GB at cu128. Deduplication across them is
+  when upstream fixes it. Anything downstream of crown segmentation -- ALI's IOS
+  half, the IOS modes of ASO/AREG/FlexReg -- has been broken on the current image.
+- **Disk.** Each torch venv is 7.2-7.7 GB at cu128. Deduplication across them is
   not automatic and depends on `UV_CACHE_DIR` sitting on the same filesystem as
   the venvs; see the repository README.

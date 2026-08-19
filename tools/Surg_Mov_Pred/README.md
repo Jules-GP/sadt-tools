@@ -8,12 +8,12 @@ measurement, each shipped with the scaler it was trained against.
 
 Ported from DCBIA-OrthoLab/SlicerAutomatedDentalTools, path
 `SurgMovPred_CLI/SurgMovPred_CLI.py`, commit `d7702ae` (2026-06-24), by way of
-`slicer-remote-tool-server`'s `tools/SurgMovPred/` — whose history this
+`slicer-remote-tool-server`'s `tools/SurgMovPred/` -- whose history this
 repository carries, so `git log --follow` on `src/sadt_surgmovpred/pipeline.py`
 reaches back through it.
 
 Upstream pins kept as-is: none are pinned upstream except `numpy==2.4.0`, which
-was **not** adopted — see "Versions" below.
+was **not** adopted -- see "Versions" below.
 
 Changes from upstream:
 
@@ -41,8 +41,8 @@ The algorithm itself is unchanged: `clean_name`, `find_id_column`,
 | | |
 |---|---|
 | Inputs | `measurements`: one CSV/XLSX/ODS table, one row per patient, or a folder of them for a batch. `model`: folder of model packages. `output_dir`: where results go. |
-| Outputs | `predictions_outputs.xlsx` and `predictions_outputs.csv` — one row per patient, one column per predicted measurement, plus `IDPatient`. |
-| Model files | One subfolder per predicted measurement, each holding a `stacking_package.pkl` of `{target_name, features_names, scaler, model}`. Fetched by the server into `/DATA/SurgMovPred/models`; the shipped set is `all_models/` — 112 packages, 1.4 GB. |
+| Outputs | `predictions_outputs.xlsx` and `predictions_outputs.csv` -- one row per patient, one column per predicted measurement, plus `IDPatient`. |
+| Model files | One subfolder per predicted measurement, each holding a `stacking_package.pkl` of `{target_name, features_names, scaler, model}`. Fetched by the server into `/DATA/SurgMovPred/models`; the shipped set is `all_models/` -- 112 packages, 1.4 GB. |
 | GPU | None. This tool is CPU-only. |
 
 Two behaviours worth knowing before reading a result:
@@ -65,8 +65,8 @@ openpyxl 3.1.5, odfpy 1.4.1.
   sub-estimators, so `joblib.load` fails outright without it. It is absent from
   the tool's import list because nothing imports it by name.
 - **The models were pickled under scikit-learn 1.6.1 and run under 1.7.2.** That
-  mismatch is upstream's own design — it silences `InconsistentVersionWarning`
-  because compatibility is checked before a model ships — and moving the pin to
+  mismatch is upstream's own design -- it silences `InconsistentVersionWarning`
+  because compatibility is checked before a model ships -- and moving the pin to
   1.6.1 would be a change, not a fix.
 - **Upstream's `numpy==2.4.0` was not adopted.** The deployed server runs 2.2.6,
   and 2.2.6 is what produced every number this port was checked against.
@@ -95,7 +95,7 @@ was chosen for support life rather than to reproduce a number.
   max absolute difference 0.000e+00 across the 11 312 predicted values, and the
   `IDPatient` column matches exactly. Column *order* differs by design (see
   Changes from upstream); the column sets are equal.
-- **Tolerance**: none needed — equality was exact, so any future difference is a
+- **Tolerance**: none needed -- equality was exact, so any future difference is a
   regression rather than noise.
 
 GPU tests: none exist, the tool is CPU-only.

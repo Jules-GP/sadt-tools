@@ -2,7 +2,7 @@
 
 Copy this file into a new tool and point `run_tool` at whatever produces its
 input. `tools/ALI`, for instance, needs meshes that carry tooth labels, so its
-version of this runs `Crown_Seg` first and feeds the result straight in — the
+version of this runs `Crown_Seg` first and feeds the result straight in -- the
 real handoff, not a fixture standing in for one.
 
 Two things are only testable from out here:
@@ -12,7 +12,7 @@ Two things are only testable from out here:
   was going to create anyway; `run_tool` runs it from a neutral directory.
 * that the published schema and the callable agree. The server reads the schema
   and calls `run(**params)` from it, so an argument renamed in one place and not
-  the other breaks the chain there, not here — unless something checks.
+  the other breaks the chain there, not here -- unless something checks.
 """
 
 import numpy as np

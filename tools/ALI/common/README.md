@@ -6,7 +6,7 @@ markups file they both write.
 ## Why this is shared rather than duplicated
 
 The two engines share nothing else. They have different dependencies, different
-inference, different inputs, and — since the split — different virtualenvs and
+inference, different inputs, and -- since the split -- different virtualenvs and
 different torch versions. Duplicating 129 lines between them would cost
 nothing in maintenance and would follow this repository's usual instinct, which
 is that a second copy beats a coupling (`nnunet_runner.py` is deliberately
@@ -16,7 +16,7 @@ duplicated between AMASSS and BatchDentalSeg for exactly that reason).
 **contract with a third party**: the `.mrk.json` file Slicer opens. Its
 schema URL, its `LPS` coordinate system, its display block and its control-point
 structure are all things Slicer reads, and a divergence between the two engines
-does not fail — it produces a file that opens for one modality and not for the
+does not fail -- it produces a file that opens for one modality and not for the
 other.
 
 That is not hypothetical here. The pre-port CLIs both set
@@ -32,8 +32,8 @@ that decides what to compute belongs to its engine.
 ## What is deliberately NOT here
 
 - **`errors.py`** stays duplicated in both tools. Errors cross the process
-  boundary by exception class *name* — the runner records the name and the
-  server maps it to an HTTP status — so a shared base class is not merely
+  boundary by exception class *name* -- the runner records the name and the
+  server maps it to an HTTP status -- so a shared base class is not merely
   unnecessary, it is not the mechanism. Twenty-one lines, and sharing them
   would couple two virtualenvs for nothing.
 - **Anything with a dependency.** `dependencies` is empty and must stay so:

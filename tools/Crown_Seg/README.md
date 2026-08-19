@@ -15,7 +15,7 @@ shell out to here, so `shapeaxi.dental_model_seg.main` is called directly with
 the namespace its own `cml()` would have built.
 
 Carried over from `slicer-remote-tool-server`'s `tools/CrownSeg/`, whose history
-this repository holds — `git log --follow` on `src/sadt_crownseg/pipeline.py`
+this repository holds -- `git log --follow` on `src/sadt_crownseg/pipeline.py`
 reaches back through it.
 
 Changes made by this port:
@@ -27,16 +27,16 @@ Changes made by this port:
 - **Scratch space lives under `output_dir`** (`.crownseg_work/`, removed before
   returning), and `segment_crowns()` returns the run report rather than a
   `CrownSegRun`.
-- **Zip extraction removed** — the server unpacks archives before `run()`.
+- **Zip extraction removed** -- the server unpacks archives before `run()`.
 - **The model is a required argument.** It used to be a name resolved through
   the data store, with `default_model_path()` reading `settings.CROWNSEG_MODEL`;
   weights now arrive as a `Path`, like every other tool.
-- **The GPU semaphore is gone** — each call is its own process.
+- **The GPU semaphore is gone** -- each call is its own process.
 
 ## Working around a shapeaxi bug
 
 **CrownSeg does not currently run in the deployment, and did not before this
-port either.** `shapeaxi.dental_model_seg` — the only supported way in — reads
+port either.** `shapeaxi.dental_model_seg` -- the only supported way in -- reads
 `DentalModelSeg` off `shapeaxi.saxi_nets`, but in the 2.0.x line the class lives
 in `shapeaxi.saxi_nets_lightning`. Every 2.0.x release (2.0.0, 2.0.1, 2.0.2) has
 this; 1.x referenced the right module. Running the pre-port tool in the deployed
@@ -68,8 +68,8 @@ Three things worth knowing before reading a result:
 - **An already-labelled mesh is passed through, not re-predicted.** That is what
   makes a mixed batch of raw and pre-segmented meshes one call. Pass
   `skip_segmented=False` to force the network to run anyway.
-- **A pre-segmented `.stl` is impossible** — STL carries no point data by
-  construction — so every output is `.vtk`, whichever branch a mesh took.
+- **A pre-segmented `.stl` is impossible** -- STL carries no point data by
+  construction -- so every output is `.vtk`, whichever branch a mesh took.
 - **`numbering` changes the integers written into the array**, not the mesh.
   Whatever consumes the result has to agree; the report records which was used.
 
@@ -96,8 +96,8 @@ segmentation = [
 
 **We are deliberately stricter than upstream on one point**: upstream leaves
 torch unpinned, so it arrives as a shapeaxi dependency and resolves to whatever
-is current. We pin `torch==2.11.0`. An unpinned torch is not reproducible — the
-same `uv sync` two months apart gives two different runtimes — and the pytorch3d
+is current. We pin `torch==2.11.0`. An unpinned torch is not reproducible -- the
+same `uv sync` two months apart gives two different runtimes -- and the pytorch3d
 wheel tag names one torch version and one CUDA variant *exactly*. Bumping torch
 therefore means bumping the pytorch3d tag in the same commit; they are one
 decision, not two.
@@ -106,7 +106,7 @@ decision, not two.
 
 Upstream moved this env to 3.12 because shapeaxi 1.0.10 pinned
 `grpcio==1.51.1`, which has no cp312 wheel. shapeaxi 2.0.2 dropped that pin, so
-grpcio resolves to 1.83.0, which publishes cp311 wheels — the reason for the
+grpcio resolves to 1.83.0, which publishes cp311 wheels -- the reason for the
 move no longer applies. Verified rather than assumed: the full set
 (shapeaxi 2.0.2, ocnn 2.2.1, torch 2.11.0, pytorch3d, monai, itk) resolves on
 3.11 in under a second.
@@ -114,8 +114,8 @@ move no longer applies. Verified rather than assumed: the full set
 ### The four numbers that must agree
 
 pytorch3d and torchvision both ship compiled extensions linked against one
-specific torch build. Three numbers have to line up — torch version, CUDA
-variant, Python ABI — and a mismatch is **not** an install error: the package
+specific torch build. Three numbers have to line up -- torch version, CUDA
+variant, Python ABI -- and a mismatch is **not** an install error: the package
 imports fine and dies on the first CUDA kernel.
 
 ```toml
@@ -157,7 +157,7 @@ pytorch3d 0.7.9+pt2110cu128      knn_points on cuda -> OK
 
 End to end on `T1_01_U_segmented.vtk` (294,260 points) with
 `skip_segmented=False` to force the engine: **52.3 s**, 15 distinct tooth
-labels, and `PredictedID` **bit-identical to the reference — 0 of 294,260
+labels, and `PredictedID` **bit-identical to the reference -- 0 of 294,260
 points differ**.
 
 `PredictedID` is the array to compare, and the only one. It is the network's
@@ -165,7 +165,7 @@ raw per-point prediction; `Universal_ID` is shapeaxi's post-processed
 labelling, which the section below shows is not deterministic between two runs
 of the *same* code. Bit-identical `PredictedID` under torch 2.11 + pytorch3d
 0.7.9+pt2110cu128 therefore says the version move does not perturb inference at
-all — a stronger statement than any agreement percentage, and the same result
+all -- a stronger statement than any agreement percentage, and the same result
 the pre-port validation recorded against torch 2.8.
 
 `uv sync --extra segmentation` no longer compiles anything: the wheel is
@@ -174,7 +174,7 @@ prebuilt, so there is nothing to cache in a local `/wheels` directory.
 ## Validated against
 
 - **Input**: `DATA/CrownSeg/testfiles/T1_01_U_segmented.vtk` (294 260 points),
-  with `skip_segmented=False` so the network actually runs — the published test
+  with `skip_segmented=False` so the network actually runs -- the published test
   mesh is already labelled.
 - **Weights**: `07-21-22_val-loss0.169.pth`, staged from the release named in the
   server's manifest and checked against its recorded size.
@@ -200,16 +200,16 @@ port         930    2607     826       0
 ```
 
 - **Tolerance**: none of the difference is attributable to the repackaging.
-  `PredictedID` — everything the network produces — is identical every time, so
+  `PredictedID` -- everything the network produces -- is identical every time, so
   the port demonstrably does not touch inference. `Universal_ID` comes out of
   shapeaxi's own "closing operation", which is not deterministic: two
-  *reference* runs differ by 1 216–2 361 points, and the port's spread against
-  them (826–2 607) is the same range. **Treat a difference in `PredictedID` as a
+  *reference* runs differ by 1 216-2 361 points, and the port's spread against
+  them (826-2 607) is the same range. **Treat a difference in `PredictedID` as a
   regression**; `Universal_ID` alone is this noise floor.
 
 **GPU tests**: `test_real_model_labels_a_real_mesh` is marked `gpu`/`models` and
 needs the extra. It was exercised through the run above rather than through
-pytest, because pytorch3d cannot be built on this workstation — no CUDA toolkit.
+pytest, because pytorch3d cannot be built on this workstation -- no CUDA toolkit.
 The 23 other tests stub the engine and run anywhere, which is what CI does.
 
 ## Working on it
