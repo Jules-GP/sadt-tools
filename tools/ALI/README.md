@@ -3,11 +3,11 @@
 Places anatomical landmarks and writes Slicer markups files (`.mrk.json`). One
 tool, two engines that share nothing but their output format:
 
-- **CBCT** — one deep-RL agent per landmark walks the volume at 1 mm and then at
+- **CBCT** -- one deep-RL agent per landmark walks the volume at 1 mm and then at
   0.3 mm until it converges on the point. 119 landmarks across four regions.
-- **IOS** — per tooth, the mesh is rendered from a dozen viewpoints and a 2D
+- **IOS** -- per tooth, the mesh is rendered from a dozen viewpoints and a 2D
   UNet predicts masks that are projected back onto the surface. Three networks:
-  **Occlusal**, **Cervical**, and **Mucogingival** — the last one on the
+  **Occlusal**, **Cervical**, and **Mucogingival** -- the last one on the
   gingival margin rather than the crown, mandible only, off by default.
 
 Which engine runs is decided from the data, never from an argument.
@@ -16,7 +16,7 @@ Which engine runs is decided from the data, never from an argument.
 
 Ported from DCBIA-OrthoLab/SlicerAutomatedDentalTools, paths `ALI_CBCT/`,
 `ALI_CBCT_utils/`, `ALI_IOS/` and `ALI_IOS_utils/`, by way of
-`slicer-remote-tool-server`'s `tools/ALI/` — whose history this repository
+`slicer-remote-tool-server`'s `tools/ALI/` -- whose history this repository
 carries, so `git log --follow` on `src/sadt_ali/cbct/engine.py` reaches back
 through it to `a0ed474` (2026-07-31).
 
@@ -43,7 +43,7 @@ through it to `a0ed474` (2026-07-31).
 Upstream pins **not** kept: this package pins torch 2.8.0+cu128, monai 1.6.0,
 itk 5.4.7 and Python 3.11. See "Versions" for why.
 
-Changes from upstream — the algorithm is untouched, the envelope is not. The
+Changes from upstream -- the algorithm is untouched, the envelope is not. The
 first four were made during the server-side port and are unchanged here; the
 rest are this migration's.
 
@@ -56,11 +56,11 @@ rest are this migration's.
   itself; fatal for anyone opening a returned file.
 - **Scans are keyed by path relative to the input root**, not by base name. Two
   patients called `scan.nii.gz` in different folders used to overwrite each
-  other, twice — in the working dictionary and again in the flat output folder.
+  other, twice -- in the working dictionary and again in the flat output folder.
 - **Both impacted-canine spellings resolve** (`UR3OI` ≡ `UR3OIP`) and
   `group_of()` never raises. The unguarded `LABEL_GROUPS[...]` lookup this
   replaces threw a `KeyError` caught far above, and *nothing at all* was written
-  for that scan — including every landmark already found.
+  for that scan -- including every landmark already found.
 - **Zip extraction removed.** The server unpacks archives before `run()` is
   called, with the bomb cap and `strip_single_root` that used to live in
   `ALILogic._extracted`.
@@ -70,7 +70,7 @@ rest are this migration's.
   The layout check survives: a bundle of the wrong kind is still refused with a
   message naming both kinds, which is what that code was really for.
 - **Per-tooth selection is not exposed.** Upstream's IOS CLI takes `teeth` and
-  `teeth_mg` — which teeth to predict on, and which to predict the mucogingival
+  `teeth_mg` -- which teeth to predict on, and which to predict the mucogingival
   point for. `ALI_IOS` takes neither: every tooth the mesh carries a label for is
   predicted, on every run.
 
@@ -90,7 +90,7 @@ rest are this migration's.
   `tools.CrownSeg` in-process and segmented an unlabelled mesh on the fly.
   Tools do not call each other; `ios.engine.require_labels()` refuses the batch
   up front instead, naming `Crown_Seg` and the array it looked for. **This is
-  the one behaviour change a user can see** — see "The Crown_Seg chain".
+  the one behaviour change a user can see** -- see "The Crown_Seg chain".
 - **The GPU semaphore is gone.** Both engines held a
   `threading.BoundedSemaphore(ALI_MAX_GPU_JOBS)`, which serialised inference
   when every tool shared one process. A tool is its own process now, so an
@@ -107,13 +107,13 @@ rest are this migration's.
 | Inputs | `input`: one CBCT (`.nii`/`.nii.gz`/`.nrrd`/`.nrrd.gz`/`.gipl`/`.gipl.gz`), one intraoral surface (`.vtk`/`.stl`), or a folder of either, searched recursively. A DICOM series inside a folder is converted automatically. `model`: the bundle. `output_dir`: where results go. |
 | Outputs | One `<scan>_lm_<ID>.mrk.json` per scan, mirroring the input's folder tree, plus `run_report.json`. |
 | Model files | CBCT: `<bundle>/**/<landmark>/<scale>/*.pth`, scale folders named `1` and `0-3`, both required per landmark. IOS: flat checkpoints carrying an `O`/`C` token and an `Upper`/`Lower` one, e.g. `Upper_O_model.pth`. Fetched by the server into `/DATA/ALI/models`. |
-| GPU | Used when available; `device="cpu"` works and is much slower — the per-landmark search budget defaults to 60 s on CPU against 15 s on CUDA for that reason. |
+| GPU | Used when available; `device="cpu"` works and is much slower -- the per-landmark search budget defaults to 60 s on CPU against 15 s on CUDA for that reason. |
 
 Three behaviours worth knowing before reading a result:
 
 - **`landmarks` replaces `cbct_regions`, it does not narrow it.** Naming any
   landmark makes the region selection inert. That is what lets a caller ask for
-  the seven points it needs instead of running 58 agents to use seven — one
+  the seven points it needs instead of running 58 agents to use seven -- one
   agent being a full two-scale walk of the volume.
 - **A landmark missing from the bundle and a landmark that never converged are
   different things**, and look identical in the Slicer scene. The first is in
@@ -132,13 +132,13 @@ Crown_Seg  →  ALI (IOS)
 ```
 
 Crown_Seg's `run_report.json` lists every labelled mesh under `segmented_meshes`,
-whether this run produced the labels or found them already there — so re-running
+whether this run produced the labels or found them already there -- so re-running
 the chain on a mixed batch is cheap and safe. Feed its output directory straight
 in as ALI's `input`.
 
 Skipping it is not a silent failure: `require_labels()` checks the whole batch
 before any weights load and refuses it with a message naming `Crown_Seg` and the
-three array names it looked for. Checking up front matters — discovering it on
+three array names it looked for. Checking up front matters -- discovering it on
 mesh 40 of 40 costs an hour of inference first.
 
 `tests/test_integration.py` runs the real chain, each tool in its own venv, the
@@ -165,8 +165,8 @@ rather than worked around.
 
 ## Versions
 
-Pinned to what the deployed server actually runs — torch 2.8.0+cu128,
-monai 1.6.0, itk 5.4.7, SimpleITK 2.5.6, vtk 9.6.2, numpy 2.3.2, Python 3.11 —
+Pinned to what the deployed server actually runs -- torch 2.8.0+cu128,
+monai 1.6.0, itk 5.4.7, SimpleITK 2.5.6, vtk 9.6.2, numpy 2.3.2, Python 3.11 --
 which is the same reasoning as [AMASSS](../AMASSS/README.md#versions): the
 Slicer module installs into Slicer's shared interpreter, where the pins are a
 truce with fifteen other modules, and no ALI result has ever been produced on
@@ -181,7 +181,7 @@ removed years ago; at 1.6.0 only the former exists and the branch is gone.
 ### pytorch3d
 
 Only the IOS engine needs it, so it sits behind an extra and a plain `uv sync`
-stays fast — CI can import the package and publish its schema, and the CBCT
+stays fast -- CI can import the package and publish its schema, and the CBCT
 engine works with no pytorch3d at all.
 
 ```toml
@@ -198,12 +198,12 @@ pytorch3d = ["torch"]
 Same incantation as [Crown_Seg](../Crown_Seg/README.md), same tag, so the two
 tools share one build:
 
-- PyPI's newest pytorch3d is 0.7.4, with wheels for cp38–cp310 only, built
+- PyPI's newest pytorch3d is 0.7.4, with wheels for cp38-cp310 only, built
   against a torch generations older than ours. It is compiled from source.
 - `extra-build-dependencies` puts torch into pytorch3d's isolated build
   environment. Its `setup.py` imports torch without declaring it, so without
   this the lock fails with `ModuleNotFoundError: No module named 'torch'`.
-  `no-build-isolation-package` does **not** work here — it stops uv from
+  `no-build-isolation-package` does **not** work here -- it stops uv from
   providing torch rather than making it available.
 
 `uv lock` resolves 56 packages in about a second. `uv sync --extra ios` then
@@ -225,7 +225,7 @@ deduplicating that across tools at build time.
   output-containment rule and every cross-argument rule run for real, with no
   checkpoint and no card.
 - **Weight discovery, against the real 14 GB bundle**: `discover_weights` finds
-  **119 landmarks carrying both scales** — exactly the 119 this package's
+  **119 landmarks carrying both scales** -- exactly the 119 this package's
   catalog declares, with nothing left ungrouped, so the bundle's folder names
   and the vocabulary agree completely. The IOS bundle resolves all four
   (network, jaw) pairs and reports `Lower_MG_v6.pth` as unrecognised, which is
@@ -233,7 +233,7 @@ deduplicating that across tools at build time.
 - **Against the pre-port implementation: bit-identical.**
   - **Input**: `DATA/ALI/testfiles/MG_test_scan.nii.gz`, one real CBCT.
   - **Weights**: `DATA/ALI/models/ALI_CBCT_Models`, the seven landmarks ASO
-    registers on (`Ba`, `S`, `N`, `RPo`, `LPo`, `ROr`, `LOr`) — the set that
+    registers on (`Ba`, `S`, `N`, `RPo`, `LPo`, `ROr`, `LOr`) -- the set that
     matters most, since another tool depends on it.
   - **Reference**: `slicer-remote-tool-server`'s `tools/ALI/`, verified
     byte-identical to the revision this repository imported, run **inside this
@@ -252,27 +252,27 @@ deduplicating that across tools at build time.
     | port vs reference (×4) | 0.0000 mm | 0.0000 mm | 7/7 |
 
   - **Tolerance**: none needed. **Treat any non-zero difference as a
-    regression** — unlike AMASSS, where nnUNet's CUDA nondeterminism sets a
+    regression** -- unlike AMASSS, where nnUNet's CUDA nondeterminism sets a
     noise floor, nothing here is nondeterministic on a scan whose agents
     converge without leaving the volume.
 - **GPU tests were run**: `uv run pytest -m "gpu and models"` on an RTX 6000 Ada
-  — passed in 38 s, all seven landmarks found, `device=cuda`, every point inside
+  -- passed in 38 s, all seven landmarks found, `device=cuda`, every point inside
   the scan's own physical extent.
-- **The IOS half, on real weights and a real card** — run inside
+- **The IOS half, on real weights and a real card** -- run inside
   `ghcr.io/jules-gp/lab-ai:2026.08`, which already carries pytorch3d 0.7.9 (the
   tag this package pins) and CUDA 12.8, so no source build was needed:
   - **Input**: `DATA/ALI/testfiles/T1_01_U_segmented.vtk`, a real segmented
     upper arch. **Weights**: `DATA/ALI/models/ALI_IOS_Models`.
-  - **Occlusal**: **42 landmarks** — 14 teeth × 3 types, every tooth the mesh
-    carries — in 21 s, `device=cuda`, one markups file, no failures.
+  - **Occlusal**: **42 landmarks** -- 14 teeth × 3 types, every tooth the mesh
+    carries -- in 21 s, `device=cuda`, one markups file, no failures.
   - **Mucogingival on that same maxilla**: correctly produces **nothing** and
     does not fail the run. `NETWORK_JAWS` restricts it to the mandible, so an
     upper arch is not a missing model but a question the network cannot be
-    asked — `jaws_without_model` stays empty and the occlusal pass is
+    asked -- `jaws_without_model` stays empty and the occlusal pass is
     unaffected.
 - **Mucogingival's predictions are NOT validated.** The only intraoral fixture
   on hand is an upper arch, and MG runs on the mandible alone, so nothing here
-  has ever placed one of its points. What is verified is the plumbing — the
+  has ever placed one of its points. What is verified is the plumbing -- the
   network is offered, off by default, restricted to the lower jaw, its label
   table is positional, and a degraded point carries its caveat into the file.
   **A lower-arch mesh is all that is missing**; see tests/data/README.md.

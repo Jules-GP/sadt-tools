@@ -17,6 +17,15 @@ import os
 import shutil
 import time
 
+from sadt_ali_common.discovery import (
+    IOS,
+    SURFACE_EXTENSIONS,
+    VOLUME_EXTENSIONS,
+    WORK_DIRNAME,
+    classify,
+    keyed,
+)
+
 from .errors import ToolInputError
 from . import catalog as ios_catalog
 

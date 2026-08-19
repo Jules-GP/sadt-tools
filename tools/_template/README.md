@@ -84,7 +84,7 @@ uv run pytest -m gpu    # skipped in CI, run by hand before opening a PR
 ## Validated against
 
 Synthetic arrays built in `tests/test_run.py`, asserted exactly (`mean=50.0`,
-`max=99.0` over `arange(100)` above threshold 0) — no tolerance needed because
+`max=99.0` over `arange(100)` above threshold 0) -- no tolerance needed because
 there is no model.
 
 A real tool records here: which input, which model weights, which reference

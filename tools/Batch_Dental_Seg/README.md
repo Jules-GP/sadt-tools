@@ -8,7 +8,7 @@ you pick chooses the label table with it.
 
 Ported from DCBIA-OrthoLab/SlicerAutomatedDentalTools, path
 `BATCHDENTALSEG/BATCHDENTALSEGLib/SegmentationWidget.py`, commit `6df3fab`
-(2026-08-05), by way of `slicer-remote-tool-server`'s `tools/BatchDentalSeg/` —
+(2026-08-05), by way of `slicer-remote-tool-server`'s `tools/BatchDentalSeg/` --
 whose history this repository carries, so `git log --follow` on
 `src/sadt_batchdentalseg/pipeline.py` reaches back through it.
 
@@ -19,7 +19,7 @@ torch 2.8.0+cu128 and nnunetv2 2.8.1, the stack the deployed server runs. See
 Upstream is a 2940-line Qt widget and most of it is not this pipeline. Already
 absent before this port, each for a stated reason: the queue table, the RAM
 watchdog, killing nnUNet processes a crashed scan left behind, the "free
-memory" button, the per-scan cool-down, restoring the queue from disk — all of
+memory" button, the per-scan cool-down, restoring the queue from disk -- all of
 which exist because the widget runs inside Slicer on a clinician's laptop and
 has to survive being out of memory. Also not ported: the runtime model download
 from GitHub releases (a tool holding patient data does not make outbound calls
@@ -27,14 +27,14 @@ mid-run), the auto-crop (upstream applies it only when its RAM preflight fails,
 and it changes what the network sees), the mirroring resolution (a button the
 user presses after looking at the result), and the mesh exports.
 
-Changes made by this port — the algorithm is untouched:
+Changes made by this port -- the algorithm is untouched:
 
 - **Scratch space lives under `output_dir`** (`.batchdentalseg_work/`, removed
   before returning). A tool must not write outside the directory it is given.
 - **`segment()` returns the run report** instead of a `SegmentationRun`; tools
   no longer call each other.
 - **Zip extraction removed.** The server unpacks archives before `run()`.
-- **The GPU semaphore is gone** — each call is its own process now.
+- **The GPU semaphore is gone** -- each call is its own process now.
 - **`device` is a `Literal["cuda", "cpu"]`**, so the schema publishes both
   options. `model` deliberately stays a plain `Path`: which bundles exist is a
   property of the deployment, not of this package, so the picker comes from the
@@ -62,7 +62,7 @@ Models, and what each labels:
 |---|---|
 | `DentalSegmentator` | Adult. Upper Skull (maxilla included), Mandible, Upper Teeth, Lower Teeth, Mandibular canal |
 | `PediatricDentalSeg` | Paediatric, the same five |
-| `NasoMaxillaDentSeg` | Six — the maxilla is split out of the Upper Skull, which shifts every later value |
+| `NasoMaxillaDentSeg` | Six -- the maxilla is split out of the Upper Skull, which shifts every later value |
 | `UniversalLab` | Every tooth individually in Universal numbering, deciduous included, plus Mandible, Maxilla and Mandibular canal |
 
 Three things worth knowing before reading a result:
@@ -72,7 +72,7 @@ Three things worth knowing before reading a result:
   caller pair bundle X with the labels of Y, and the result would be a
   plausible volume with every structure named wrong.
 - **The label values are part of the trained weights**, not a presentation
-  choice — they are the integers the network emits. Renaming a catalog entry is
+  choice -- they are the integers the network emits. Renaming a catalog entry is
   safe; renumbering one silently mislabels anatomy. The report ships the table
   next to the results, because the segmentation is a volume of integers and
   without it they mean nothing.
@@ -90,11 +90,11 @@ cannot reach it, so the check is gone and only this note remains.
 
 ## Versions
 
-torch 2.8.0+cu128, nnunetv2 2.8.1, SimpleITK 2.5.6, numpy 2.3.2, Python 3.11 —
+torch 2.8.0+cu128, nnunetv2 2.8.1, SimpleITK 2.5.6, numpy 2.3.2, Python 3.11 --
 the stack the deployed server runs, which is where every BatchDentalSeg result
 to date was produced. No vtk: the mesh exports are not ported.
 
-The CUDA wheels come from an explicit index (`explicit = true` is load-bearing —
+The CUDA wheels come from an explicit index (`explicit = true` is load-bearing --
 without it uv looks for every package on the PyTorch index); the venv is 7.2 GB.
 The reasoning is the same as AMASSS's, at length in `tools/AMASSS/README.md`.
 
@@ -112,8 +112,8 @@ The reasoning is the same as AMASSS's, at length in `tools/AMASSS/README.md`.
 
 As with AMASSS, nnUNet on CUDA is not bit-deterministic, so the reference was
 run three times and this package three times before any conclusion was drawn.
-Both sets scatter across the same states — 2 of the 9 port×reference pairs are
-bit-identical on the label volume — and the worst port-vs-reference difference
+Both sets scatter across the same states -- 2 of the 9 port×reference pairs are
+bit-identical on the label volume -- and the worst port-vs-reference difference
 is the *same number* as the worst reference-vs-reference difference on five of
 the six files:
 
@@ -130,7 +130,7 @@ the six files:
   above it is nnUNet's own CUDA noise floor, which the pre-port tool shares.
 
 **GPU tests were run**: `uv run pytest -m models` with the PediatricDentalSeg
-bundle on an RTX 6000 Ada — passed. CI skips them (`-m "not gpu"`); the other 24
+bundle on an RTX 6000 Ada -- passed. CI skips them (`-m "not gpu"`); the other 24
 tests stub `nnunet_runner.predict_folder` and need no checkpoint.
 
 ## Working on it

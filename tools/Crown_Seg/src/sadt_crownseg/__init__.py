@@ -34,7 +34,7 @@ def run(
         suffix: Added to each output name, e.g. `arch_Seg.vtk`.
         numbering: Universal or FDI tooth numbering. This changes the integers
             written into the array, not the mesh, and whatever consumes the
-            result has to agree — the report records which was used.
+            result has to agree -- the report records which was used.
         skip_segmented: Pass a mesh that already carries labels through
             unchanged instead of spending minutes re-predicting it. That is
             what makes a mixed batch of raw and pre-segmented meshes one call.
@@ -47,7 +47,7 @@ def run(
     Returns:
         The output directory, holding the labelled meshes and the run report.
         The report lists every mesh that now carries labels under
-        `segmented_meshes` — that is what a caller sequencing this before ALI
+        `segmented_meshes` -- that is what a caller sequencing this before ALI
         reads.
     """
     # shapeaxi, torch and vtk are imported inside the pipeline: CI imports this

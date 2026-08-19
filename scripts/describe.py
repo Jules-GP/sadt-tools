@@ -279,10 +279,56 @@ def supervised_calls(src_dir):
                     if isinstance(target, ast.Name):
                         constants[target.id] = node.value.value
 
+        # `for name in ("Crown_Seg", "ALI_IOS"): require(sup, name, ...)`, which
+        # is how AREG_IOSCBCT states the three tools one mode needs. The names
+        # are still literals, written once instead of three times; refusing the
+        # form would push a tool towards the more repetitive spelling to satisfy
+        # a reader that is only looking for strings.
+        loop_names = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.For) or not isinstance(node.target, ast.Name):
+                continue
+            if not isinstance(node.iter, (ast.Tuple, ast.List)):
+                continue
+            values = [element.value for element in node.iter.elts
+                      if isinstance(element, ast.Constant) and isinstance(element.value, str)]
+            if len(values) == len(node.iter.elts):
+                loop_names.setdefault(node.target.id, set()).update(values)
+
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             function = node.func
+
+            # `require(sup, "AMASSS", ...)` states a dependency without making
+            # the call: it is how a tool refuses a mode early, before an hour of
+            # work, and it names a tool exactly as `sup.run` does. It was not
+            # collected here, so AREG_IOS went on asking for 'ALI' after the
+            # split renamed it, and neither the generator nor the server's
+            # startup check said anything -- the failure waited for a
+            # mucogingival run. That is the hole this function's own docstring
+            # warns about, so it is closed rather than documented.
+            require_name = function.attr if isinstance(function, ast.Attribute) else (
+                function.id if isinstance(function, ast.Name) else None)
+            if require_name == "require" and len(node.args) >= 2:
+                first, second = node.args[0], node.args[1]
+                if isinstance(first, ast.Name) and first.id == SUPERVISOR:
+                    if isinstance(second, ast.Constant) and isinstance(second.value, str):
+                        names.add(second.value)
+                        continue
+                    if isinstance(second, ast.Name) and second.id in constants:
+                        names.add(constants[second.id])
+                        continue
+                    if isinstance(second, ast.Name) and second.id in loop_names:
+                        names.update(loop_names[second.id])
+                        continue
+                    raise SchemaError(
+                        "{}:{}: require()'s tool name must be a literal or a "
+                        "module-level string constant, so the server can check it "
+                        "exists. Got {}.".format(
+                            path.name, node.lineno, ast.dump(second)[:60])
+                    )
+
             if not isinstance(function, ast.Attribute) or function.attr != "run":
                 continue
             if not isinstance(function.value, ast.Name) or function.value.id != SUPERVISOR:
@@ -297,6 +343,8 @@ def supervised_calls(src_dir):
                 names.add(first.value)
             elif isinstance(first, ast.Name) and first.id in constants:
                 names.add(constants[first.id])
+            elif isinstance(first, ast.Name) and first.id in loop_names:
+                names.update(loop_names[first.id])
             else:
                 raise SchemaError(
                     "{}:{}: {}.run()'s tool name must be a literal or a module-level "

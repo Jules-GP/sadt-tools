@@ -826,7 +826,7 @@ def test_the_landmark_tool_is_asked_by_name_for_the_points_aso_needs(tmp_path):
     tool, params = sup.calls[0]
     # A string, not a dynamic attribute: a typo here is greppable, and the call
     # graph stays inspectable.
-    assert tool == "ALI"
+    assert tool == "ALI_CBCT"
     assert set(params["landmarks"]) == set(_REFERENCE_POINTS)
     assert params["model"] == "/data/ALI/models/Bundle"
     assert "cbct_regions" not in params

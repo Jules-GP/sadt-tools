@@ -51,7 +51,18 @@ def write_surface(path, labelled=False, array_name="Universal_ID"):
 
 @pytest.fixture
 def stub_shapeaxi(monkeypatch, tmp_path):
-    """Write a labelled mesh wherever shapeaxi would have written one."""
+    """Write a labelled mesh wherever shapeaxi would have written one.
+
+    The import probe is stubbed too. Replacing only `_run_shapeaxi` left a
+    half-stubbed world: on a machine without the `segmentation` extra the probe
+    still failed, so an already-segmented mesh came back `engine_unavailable`
+    rather than `already_segmented` and the pass-through test failed for a
+    reason that had nothing to do with pass-through. It passed locally, where
+    the extra is installed, and failed in CI, where `uv sync --frozen` does not
+    install extras. A fixture that stands in for a working engine has to stand
+    in for all of it.
+    """
+    monkeypatch.setattr(pipeline, "_import_dental_model_seg", lambda: None)
     calls = []
 
     def fake_run(csv_path, output_dir, model_path, input_root, array_name, suffix,
@@ -153,7 +164,8 @@ def test_a_raw_mesh_is_segmented_and_reported(tmp_path, stub_shapeaxi):
     )
 
     assert report["summary"] == {
-        "total": 1, "segmented": 1, "already_segmented": 0, "failed": 0
+        "total": 1, "segmented": 1, "already_segmented": 0, "failed": 0,
+        "engine_unavailable": 0,
     }
     assert len(report["segmented_meshes"]) == 1
     assert pipeline.is_segmented(report["segmented_meshes"][0])

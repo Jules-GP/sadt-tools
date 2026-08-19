@@ -1,6 +1,6 @@
 """How a client should lay this tool's panel out. Presentation only.
 
-Nothing here changes what `run()` accepts — `describe.py` merges these hints
+Nothing here changes what `run()` accepts -- `describe.py` merges these hints
 into the published schema and refuses any that name an argument or an option
 the signature does not offer. Delete this file and the tool still works; the
 panel just gets worse.

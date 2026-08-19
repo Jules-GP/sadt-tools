@@ -102,7 +102,7 @@ def predict_folder(model_folder: str, input_dir: str, output_dir: str, device: s
     A whole folder per call, so the checkpoint is loaded once for the batch
     rather than once per scan.
 
-    NOTE: AMASSS additionally redirects nnUNet's resamplers to the GPU, which is
+    AMASSS additionally redirects nnUNet's resamplers to the GPU, which is
     worth ~2.5x there. It is deliberately not done here yet: it drops the input
     resampling from spline order 3 to order 1, and nothing has measured what
     that costs THESE models.

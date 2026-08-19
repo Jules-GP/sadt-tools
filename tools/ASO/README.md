@@ -1,7 +1,7 @@
 # sadt-aso
 
 Orients CBCT volumes or intra-oral meshes onto a standard reference frame, so
-that two timepoints of the same patient — or two patients — can be compared in
+that two timepoints of the same patient -- or two patients -- can be compared in
 the same coordinate system. One tool, two engines, four modes:
 
 |          | Semi-Automated | Fully-Automated |
@@ -13,7 +13,7 @@ the same coordinate system. One tool, two engines, four modes:
 
 Ported from DCBIA-OrthoLab/SlicerAutomatedDentalTools, paths `ASO/`,
 `ASO_CBCT/{PRE,SEMI}_ASO_CBCT/` and `ASO_IOS/{PRE,SEMI}_ASO_IOS/`, by way of
-`slicer-remote-tool-server`'s `tools/ASO/` — whose history this repository
+`slicer-remote-tool-server`'s `tools/ASO/` -- whose history this repository
 carries, so `git log --follow` on `src/sadt_aso/cbct/pipeline.py` reaches back
 through it.
 
@@ -24,10 +24,10 @@ through it.
 > [PROVENANCE.md](../../PROVENANCE.md).
 
 Upstream pins **not** kept: nothing is pinned upstream. This package pins
-SimpleITK 2.5.6, vtk 9.6.2, numpy 2.3.2 and dicom2nifti 2.6.2 — the first three
+SimpleITK 2.5.6, vtk 9.6.2, numpy 2.3.2 and dicom2nifti 2.6.2 -- the first three
 being what every sibling tool already locks.
 
-Changes from upstream — the algorithm is untouched, the envelope is not. The
+Changes from upstream -- the algorithm is untouched, the envelope is not. The
 first group were made during the server-side port and are unchanged here.
 
 - **The whole Slicer envelope is gone**: no `<filter-progress>` prints, no
@@ -45,7 +45,7 @@ first group were made during the server-side port and are unchanged here.
 - **The reference is checked against the selection up front.** The two published
   reference bundles carry disjoint landmark sets, so picking the second without
   changing the selection made every patient fail separately with "0 usable
-  landmarks" — forty identical failures for one wrong choice.
+  landmarks" -- forty identical failures for one wrong choice.
 - **The semi-automated CLI registered centred volumes against uncentred
   points**, because it recentred nothing and then read a `.tfm` only the
   fully-automated chain ever produced. `center_landmarks` fixes that.
@@ -60,7 +60,7 @@ And this migration's:
   into a directory of its own, because its neighbours are not necessarily part
   of the same input.
 - **`src/ali_client.py` is gone.** It reached into the server's `registry.TOOLS`
-  to call ALI in-process. Replaced by one `sup.run("ALI", ...)` — see below.
+  to call ALI in-process. Replaced by one `sup.run("ALI", ...)` -- see below.
 - **`landmarks` is a new argument**, and it is what makes the tool usable
   standalone.
 - **`max_triplets` and `seed` are arguments**, not settings, with the defaults
@@ -78,8 +78,8 @@ Fully-automated CBCT needs landmarks it does not place itself, and it needs them
 recentre every scan  →  predict landmarks on the CENTRED scans  →  register
 ```
 
-That ordering is upstream's — the Slicer chain ran `PRE_ASO_CBCT` before
-`ALI_CBCT` — and it is why this tool cannot be expressed as "run ALI first, then
+That ordering is upstream's -- the Slicer chain ran `PRE_ASO_CBCT` before
+`ALI_CBCT` -- and it is why this tool cannot be expressed as "run ALI first, then
 run ASO on its output". Recentring is a pure metadata change, so the reordering
 *ought* to be exact; ALI's `physical_position` takes the absolute value of the
 origin, which does not commute with moving it. That is
@@ -94,7 +94,7 @@ predictions = sup.run("ALI", input=centered_root, model=..., output_dir=..., lan
 ```
 
 - `sup` is **keyword-only and unannotated**. That is the marker `describe.py`
-  reads to keep it out of the schema — it is not data, and no client sends one.
+  reads to keep it out of the schema -- it is not data, and no client sends one.
   The schema instead publishes `"supervisor": true`, so a runner that cannot
   inject one refuses the tool rather than calling it and failing halfway.
 - It is **duck-typed**. Nothing here imports a supervisor type; doing so would
@@ -106,9 +106,9 @@ predictions = sup.run("ALI", input=centered_root, model=..., output_dir=..., lan
   and the call graph stays inspectable.
 - ALI is asked for landmarks **by name**, not by region. ASO's seven points
   straddle two of ALI's regions, so asking by region would run 58 agents to use
-  seven — and one agent is a full two-scale walk of the volume.
+  seven -- and one agent is a full two-scale walk of the volume.
 
-**The server does not implement supervisors yet** — re-checked 2026-08-14 against
+**The server does not implement supervisors yet** -- re-checked 2026-08-14 against
 `newArch`: one occurrence of the word in the whole repository, and it is a line
 of documentation. Until that changes, fully-automated CBCT is not servable and
 this package's other three modes are, including fully-automated **with
@@ -117,7 +117,7 @@ this package's other three modes are, including fully-automated **with
 
 ### From a checkout, with a supervisor
 
-`scripts/run_tool.py` builds one and chains for you — no server, no Docker:
+`scripts/run_tool.py` builds one and chains for you -- no server, no Docker:
 
 ```bash
 python scripts/run_tool.py ASO \
@@ -152,7 +152,7 @@ that already has the points does not spend a GPU re-predicting them.
 |---|---|
 | Inputs | `input`: one scan (`.nii`/`.nii.gz`/`.nrrd`/`.nrrd.gz`/`.gipl`/`.gipl.gz`), one mesh (`.vtk`/`.stl`), or a folder of either. `reference`: the already-oriented case defining the target frame. `output_dir`: where results go. |
 | Outputs | Per patient: the oriented scan or mesh, its landmarks (`_lm_Or.mrk.json`) and the transform (`_Or_transform.tfm`), mirroring the input tree, plus `ASO_report.json`. |
-| Model files | None for three of the four modes — a *reference bundle* is data, not weights. Fully-automated CBCT needs ALI's bundle, named in `landmark_model` and passed straight through. Both `reference` and `landmark_model` are named so the server publishes them as hosted names rather than uploads. |
+| Model files | None for three of the four modes -- a *reference bundle* is data, not weights. Fully-automated CBCT needs ALI's bundle, named in `landmark_model` and passed straight through. Both `reference` and `landmark_model` are named so the server publishes them as hosted names rather than uploads. |
 | GPU | None. This is the one migrated tool with no torch in it; the venv is 1.2 GB. |
 
 Three behaviours worth knowing before reading a result:
@@ -171,7 +171,7 @@ The old `ArgSpec` schema published presentation metadata `describe.py` has no
 field for. ASO is the tool that used it most, because its four modes share one
 schema:
 
-- **`visible_when`** hid each mode's arguments when the other was selected —
+- **`visible_when`** hid each mode's arguments when the other was selected --
   the Slicer module's four-page `QStackedWidget`, expressed as data. Without it
   a panel shows all 115 CBCT landmarks next to all 32 teeth, whichever mode is
   chosen.
@@ -181,14 +181,14 @@ schema:
   boxes, and the CBCT landmarks as one tab per region.
 
 None of this affects a result, and every cross-argument rule is still *enforced*
-— `_check_cbct` and `_check_ios` refuse an impossible combination before a file
+-- `_check_cbct` and `_check_ios` refuse an impossible combination before a file
 is read. What is lost is the panel preventing it in the first place. Raised here
 rather than worked around; the same question as
 [ALI's](../ALI/README.md#what-the-client-loses).
 
 ## Versions
 
-SimpleITK 2.5.6, vtk 9.6.2, numpy 2.3.2, dicom2nifti 2.6.2, Python 3.11 — the
+SimpleITK 2.5.6, vtk 9.6.2, numpy 2.3.2, dicom2nifti 2.6.2, Python 3.11 -- the
 deployment image's interpreter, and the same imaging stack the sibling tools
 lock, so this adds nothing new to the image.
 
@@ -196,7 +196,7 @@ Nothing upstream is pinned, so there is no upstream pin to keep or discard.
 `dicom2nifti` is the one package no other tool here uses; it is a small
 pure-python wheel and only the `dicom_input` path touches it.
 
-`uv lock` resolves 26 packages. The venv is 1.2 GB — a twentieth of a torch
+`uv lock` resolves 26 packages. The venv is 1.2 GB -- a twentieth of a torch
 tool's, which is what makes this the cheapest tool in the repository to deploy.
 
 ## Validated against
@@ -207,21 +207,21 @@ tool's, which is what makes this the cheapest tool in the repository to deploy.
   (3), `modality` (2) and `automation` (2). `sup` is absent from `arguments`, as
   it must be. Asserted out of process against the real venv.
 - **Tests**: 81 passing, 1 GPU test deselected. Six of them run the tool **out of
-  process, in its own venv**, the way the server does — including a complete
+  process, in its own venv**, the way the server does -- including a complete
   semi-automated CBCT registration on synthetic data, so the registration itself
   is exercised for real rather than stubbed.
 - **The supervisor seam**: covered in-process by a fake supervisor that writes
   the markups files the real tool would write, into the directory it is handed,
   so the whole seam (call → write → read back → merge per patient → recentre) is
   exercised. `test_the_landmark_tool_is_run_on_the_recentred_scans` asserts what
-  ALI is actually handed is centred on the physical origin — the ordering this
+  ALI is actually handed is centred on the physical origin -- the ordering this
   whole design exists to preserve.
-- **Geometry**: the registration is checked against known rotations —
+- **Geometry**: the registration is checked against known rotations --
   `test_registration_recovers_the_reference_frame`, and
   `test_the_transform_file_maps_the_result_back_to_the_original` inverts the
   written `.tfm` and lands back on the acquisition.
 - **The real chain, on real weights and a real card.** ASO fully-automated CBCT
-  was driven end to end through a real supervisor — one that runs `ALI` in
+  was driven end to end through a real supervisor -- one that runs `ALI` in
   `tools/ALI/.venv` as a subprocess, through `sadt_testkit`'s driver, exactly as
   the server's runner will. Input `DATA/ALI/testfiles/MG_test_scan.nii.gz` with
   the 4.7 GB `ALI_CBCT_Models` bundle on an RTX 6000 Ada:
@@ -234,8 +234,8 @@ tool's, which is what makes this the cheapest tool in the repository to deploy.
   work dir removed: True
   ```
 
-  All seven landmarks survived the round trip — recentre, hand ALI the centred
-  volumes, read its markups back, merge per patient, register — none dropped as
+  All seven landmarks survived the round trip -- recentre, hand ALI the centred
+  volumes, read its markups back, merge per patient, register -- none dropped as
   missing or as an outlier. Nothing was imported across the two tools; they have
   different dependency sets and different venvs.
 - **ALI itself is bit-identical to its pre-port implementation** on the same

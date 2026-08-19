@@ -1,0 +1,44 @@
+"""How a client should lay this tool's panel out. Presentation only."""
+
+from sadt_areg_common import catalogs
+
+_INPUTS = "Inputs"
+_LANDMARKS = "Landmarks"
+_MODELS = "Models"
+_OUTPUTS = "Outputs"
+
+# Registration takes the landmarks; the other two predict them. Showing the
+# landmark folders in a mode that overwrites them is how a user comes to believe
+# their files were used.
+_SUPPLIED = {"automation": catalogs.AUTOMATION_REGISTRATION}
+_PREDICTED = {"automation": [catalogs.AUTOMATION_SEMI, catalogs.AUTOMATION_FULLY]}
+_ORIENTED = {"automation": catalogs.AUTOMATION_FULLY}
+
+LAYOUT = {
+    "ios": {"section": _INPUTS, "label": "Intraoral scans"},
+    "cbct": {"section": _INPUTS, "label": "CBCT volumes"},
+    "automation": {"section": _INPUTS, "label": "Mode"},
+
+    "ios_landmarks": {
+        "section": _LANDMARKS, "label": "Intraoral landmarks", "visible_when": _SUPPLIED,
+    },
+    "cbct_landmarks": {
+        "section": _LANDMARKS, "label": "CBCT landmarks", "visible_when": _SUPPLIED,
+    },
+
+    "crown_model": {
+        "section": _MODELS, "label": "Crown segmentation model", "visible_when": _PREDICTED,
+    },
+    "ios_landmark_model": {
+        "section": _MODELS, "label": "Intraoral landmark bundle", "visible_when": _PREDICTED,
+    },
+    "landmark_model": {
+        "section": _MODELS, "label": "CBCT landmark bundle", "visible_when": _PREDICTED,
+    },
+    "cbct_reference": {
+        "section": _MODELS, "label": "Orientation reference", "visible_when": _ORIENTED,
+    },
+
+    "max_dist": {"section": _OUTPUTS, "label": "ICP match distance (mm)"},
+    "output_suffix": {"section": _OUTPUTS, "label": "Output suffix"},
+}

@@ -61,9 +61,10 @@ DEFAULT_SUFFIX = "Seg"
 WORK_DIRNAME = ".crownseg_work"
 
 _INSTALL_HINT = (
-    "CrownSeg's engine is an optional extra: shapeaxi pulls pytorch3d, which "
-    "publishes no usable wheel and is compiled from source. Install it with "
-    "`uv sync --extra segmentation` (needs a CUDA toolkit, see README.md)."
+    "CrownSeg's engine is an optional extra. Install it with "
+    "`uv sync --extra segmentation` in tools/Crown_Seg. A deployment image "
+    "builds it with `--all-extras`; if this appears there, the image was built "
+    "without them."
 )
 
 

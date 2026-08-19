@@ -22,6 +22,10 @@ dependencies = [
     # `operator torchvision::nms does not exist`.
     "torchvision==0.26.0",
     "pytorch3d==0.7.9+pt2110cu128",
+    # The 2D UNet that predicts the per-view masks. A different network from the
+    # CBCT engine's DenseNet, from the same library -- which is why the split
+    # does NOT let this tool drop monai.
+    "monai==1.6.0",
     "vtk==9.6.2",
     "numpy==2.3.2",
 ]

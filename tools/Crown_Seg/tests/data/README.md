@@ -19,7 +19,7 @@ the URLs and sizes:
 scripts/setup-models.sh --tool CrownSeg      # from a slicer-remote-tool-server checkout
 ```
 
-Note that the published test mesh is **already segmented** — it carries a
+Note that the published test mesh is **already segmented** -- it carries a
 `Universal_ID` array. It exercises the passthrough branch as it is; pass
 `skip_segmented=False` to force the network to run on it anyway, which is what
 the real-model test does.

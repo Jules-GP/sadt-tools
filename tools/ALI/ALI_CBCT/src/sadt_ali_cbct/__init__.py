@@ -88,7 +88,7 @@ def run(
         input_path=str(input),
         model_path=str(model),
         output_dir=str(output_dir),
-        cbct_regions=regions,
+        regions=regions,
         landmarks=landmarks,
         prediction_ID=prediction_ID,
         device=device,

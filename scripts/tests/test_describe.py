@@ -537,3 +537,52 @@ def test_groups_on_an_argument_with_no_choices_fails(tmp_path):
     make_layout(root, 'LAYOUT = {"scans": {"groups": {"Tab": ["a"]}}}')
 
     assert "has none" in describe(root).stderr
+
+
+# ---------------------------------------------------------------------------
+# require() states a dependency without making the call
+
+REQUIRES_LITERAL = """
+    def _preflight(sup):
+        tools.require(sup, "AMASSS", "Fully-Automated registration")
+
+    def run(scan: Path, output_dir: Path, *, sup=None) -> Path:
+        \"\"\"Register two timepoints.\"\"\"
+        _preflight(sup)
+        return output_dir
+"""
+
+REQUIRES_LOOP = """
+    def _preflight(sup):
+        for name in ("Crown_Seg", "ALI_IOS"):
+            tools.require(sup, name, "Fully-Automated registration")
+
+    def run(scan: Path, output_dir: Path, *, sup=None) -> Path:
+        \"\"\"Register two timepoints.\"\"\"
+        _preflight(sup)
+        return output_dir
+"""
+
+
+def test_a_required_tool_is_published_like_a_called_one(tmp_path):
+    """`require` names a tool without running it, and the server checks names.
+
+    Collected because it was not: AREG_IOS asked for 'ALI' through `require`
+    long after the split renamed it to 'ALI_IOS'. `sup.run` was scanned and
+    `require` was not, so neither the schema nor the server's startup check saw
+    a name that could never resolve, and the failure waited for a mucogingival
+    run to reach it.
+    """
+    schema = json.loads(describe(make_tool(tmp_path, REQUIRES_LITERAL)).stdout)
+    assert schema["calls"] == ["AMASSS"]
+
+
+def test_a_required_tool_named_in_a_loop_is_published(tmp_path):
+    """Several tools one mode needs, written once instead of three times.
+
+    Refusing this form would push a tool towards the repetitive spelling purely
+    to satisfy the reader, so the loop is resolved when every element is a
+    literal.
+    """
+    schema = json.loads(describe(make_tool(tmp_path, REQUIRES_LOOP)).stdout)
+    assert schema["calls"] == ["ALI_IOS", "Crown_Seg"]

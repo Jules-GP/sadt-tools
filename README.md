@@ -63,8 +63,8 @@ The server runs it out of process, one interpreter per tool:
 /tools/<name>/.venv/bin/python /opt/sadt/runner.py --job /jobs/<uuid>/job.json
 ```
 
-`runner.py` ships with the server and is injected by absolute path — never
-installed into a tool venv — so runner and server are always the same version
+`runner.py` ships with the server and is injected by absolute path -- never
+installed into a tool venv -- so runner and server are always the same version
 and there is no cross-repo skew to manage. That is also why there is no shared
 `sadt-core` package: adding one would put a version of *ours* inside every tool
 venv, and it would solve a problem that does not exist.
@@ -72,11 +72,11 @@ venv, and it would solve a problem that does not exist.
 A tool that needs another tool **mid-run** declares `*, sup` and is handed a
 supervisor; the call re-enters the same runner with the sibling's interpreter.
 `ASO` and `AREG` are the two that do. Everything the server has to hold up on
-its side of that — and everything else it took over when the tools stopped
-doing it — is in [docs/SERVER_CONTRACT.md](docs/SERVER_CONTRACT.md).
+its side of that -- and everything else it took over when the tools stopped
+doing it -- is in [docs/SERVER_CONTRACT.md](docs/SERVER_CONTRACT.md).
 
-The full set of rules — annotations, defaults, batch inputs, where output may be
-written — is in [CONTRIBUTING.md](CONTRIBUTING.md). `tools/_template/` is a
+The full set of rules -- annotations, defaults, batch inputs, where output may be
+written -- is in [CONTRIBUTING.md](CONTRIBUTING.md). `tools/_template/` is a
 working example of all of them.
 
 ## Layout
@@ -103,7 +103,7 @@ thing without importing it. See [testkit/README.md](testkit/README.md).
 ## Scripts
 
 `scripts/describe.py` emits the JSON schema the server publishes for a tool,
-read from `run()`'s signature — so the schema cannot drift from the code. It
+read from `run()`'s signature -- so the schema cannot drift from the code. It
 runs with the tool's own interpreter, because importing a tool needs the tool's
 dependencies:
 
@@ -125,7 +125,7 @@ $ tools/_template/.venv/bin/python scripts/describe.py tools/_template
 ```
 
 An argument annotated `Literal[...]` publishes its options as `choices`, so the
-client can render a picker without a second declaration to keep in step —
+client can render a picker without a second declaration to keep in step --
 `list[Literal[...]]` for several-of, a bare `Literal[...]` for exactly-one.
 
 It exits 2 on anything it cannot represent rather than emitting a schema that is
@@ -163,12 +163,12 @@ out/
 The second command is the whole point: ASO needs landmarks mid-run, so it is
 given a **supervisor**, and `sup.run("ALI_CBCT", ...)` re-enters this same
 script with that tool's interpreter. Chaining and nesting are the same
-recursion — `AREG → ASO → ALI_CBCT` is three levels of it with no special case.
+recursion -- `AREG → ASO → ALI_CBCT` is three levels of it with no special case.
 
 **Developer convenience, not the deployment path.** In production the server's
 `execution/runner.py` does this, and a tool cannot tell the two apart: five
 members, duck-typed, nothing shared. It is still the shortest readable
-reference for what a supervisor has to be — and the place to reproduce a
+reference for what a supervisor has to be -- and the place to reproduce a
 chaining bug without standing a server up.
 
 ## Getting started
@@ -184,6 +184,6 @@ uv run pytest    # runs run() end to end
 ## Provenance
 
 [PROVENANCE.md](PROVENANCE.md) records, for every tool, the upstream path and
-commit it was ported from and whether the algorithm was modified. That table —
-not this repository's commit history — is what tells you six months from now
+commit it was ported from and whether the algorithm was modified. That table --
+not this repository's commit history -- is what tells you six months from now
 whether a result came from upstream code or from something we changed.

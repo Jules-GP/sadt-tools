@@ -18,7 +18,7 @@ sha256s. Stage them with the server's script:
 scripts/setup-models.sh --tool BatchDentalSeg
 ```
 
-Or fetch one bundle by hand — PediatricDentalSeg is the smallest at 250 MB, and
+Or fetch one bundle by hand -- PediatricDentalSeg is the smallest at 250 MB, and
 the layout matters: the checkpoint goes under `fold_0/`, not beside the two JSON
 files, because that is the tree nnUNet's `initialize_from_trained_model_folder`
 walks.

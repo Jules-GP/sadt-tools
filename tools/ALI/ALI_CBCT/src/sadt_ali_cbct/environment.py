@@ -9,7 +9,6 @@ ago. This package pins monai 1.6.0, where only the former exists.
 """
 
 import logging
-import sys
 
 import numpy as np
 import SimpleITK as sitk

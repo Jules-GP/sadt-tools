@@ -254,6 +254,19 @@ wheels = [
 ]
 
 [[package]]
+name = "monai"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f4/ac/b14b7bcc888526537698c5f4ff49354eb19bec74dcc30d7e73881a3839a8/monai-1.6.0.tar.gz", hash = "sha256:eded72f0a73531abb6887b9473b081a42c78ec8c80dc5f2da43df159da265b9b", size = 1275977, upload-time = "2026-06-22T16:47:51.668Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/34/7c86652d06062d97bf30752ee5b77d68c78ea984210f1c28848fc1afcef0/monai-1.6.0-202606221745-py3-none-any.whl", hash = "sha256:8880fb294827448a15299f9313b96c057d87179a4efe7ae0c80085f21ec494ea", size = 1612831, upload-time = "2026-06-22T16:47:49.049Z" },
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -558,6 +571,7 @@ name = "sadt-ali-ios"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "monai" },
     { name = "numpy" },
     { name = "pytorch3d" },
     { name = "sadt-ali-common" },
@@ -574,6 +588,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "monai", specifier = "==1.6.0" },
     { name = "numpy", specifier = "==2.3.2" },
     { name = "pytorch3d", specifier = "==0.7.9+pt2110cu128", index = "https://imagemindanalytics.github.io/pytorch3d-wheels/simple/" },
     { name = "sadt-ali-common", directory = "../common" },

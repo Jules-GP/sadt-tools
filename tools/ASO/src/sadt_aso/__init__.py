@@ -71,10 +71,10 @@ def run(
             Folders are searched recursively and the output keeps their tree.
             In Semi-Automated mode the landmark files (.mrk.json) travel beside
             the scans, paired by name.
-        reference: The already-oriented case defining the target frame — its
+        reference: The already-oriented case defining the target frame -- its
             landmark file for CBCT, its landmarks and meshes for IOS.
-        output_dir: Where results are written — per patient, the oriented scan,
-            its landmarks and the transform (.tfm) — plus `ASO_report.json`.
+        output_dir: Where results are written -- per patient, the oriented scan,
+            its landmarks and the transform (.tfm) -- plus `ASO_report.json`.
             Nothing is written outside it.
         modality: CBCT volumes or intra-oral surface scans. Never inferred from
             the file extension: a folder can hold either, and guessing wrong
@@ -84,7 +84,7 @@ def run(
             Fully-Automated predicts CBCT landmarks first, and orients IOS
             meshes from the tooth labels they already carry.
         landmarks: Optional folder of landmark files (.mrk.json) to use instead
-            of the ones beside the scans — which is what makes Fully-Automated
+            of the ones beside the scans -- which is what makes Fully-Automated
             CBCT work with no supervisor: run the landmark tool yourself and
             pass its output here. Paired to scans by name, like the ones in the
             input tree.

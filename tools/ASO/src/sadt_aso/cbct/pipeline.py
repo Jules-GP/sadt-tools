@@ -18,7 +18,7 @@ import numpy as np
 import SimpleITK as sitk
 
 from .. import markups
-from ..scans import SCAN_EXTENSIONS, compressed_extension, split_scan_extension
+from ..scans import SCAN_EXTENSIONS, compressed_extension
 from . import icp
 
 logger = logging.getLogger(__name__)

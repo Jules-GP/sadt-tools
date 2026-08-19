@@ -8,14 +8,14 @@ consumes. One nnUNet v2 model per structure.
 
 Ported from DCBIA-OrthoLab/SlicerAutomatedDentalTools, path `AMASSS_CLI/`,
 commit `21a62a8` (2026-05-22), by way of `slicer-remote-tool-server`'s
-`tools/AMASSS/` — whose history this repository carries, so `git log --follow`
+`tools/AMASSS/` -- whose history this repository carries, so `git log --follow`
 on `src/sadt_amasss/pipeline.py` reaches back through it.
 
 Upstream pins **not** kept: upstream declares torch 2.2.0 / torchvision 0.17.0 /
 nnunetv2 2.8.0; this package pins torch 2.8.0+cu128 and nnunetv2 2.8.1. See
 "Versions" for why.
 
-Changes from upstream — the algorithm is untouched, the envelope is not:
+Changes from upstream -- the algorithm is untouched, the envelope is not:
 
 - **Scratch space lives under `output_dir`** (`.amasss_work/`, removed before
   returning). The server-side version took a scratch directory the server owned;
@@ -35,7 +35,7 @@ Changes from upstream — the algorithm is untouched, the envelope is not:
   what the shared image could not.
 
 The "FIX:" comments in `catalog.py` and `pipeline.py` record defects of the
-original Slicer CLI corrected during the first port — recursive folder scanning,
+original Slicer CLI corrected during the first port -- recursive folder scanning,
 the missing label colours, the `CAN` code that matched nothing, the
 `sys.exit(1)`, the batch that aborted on its last scan. They are unchanged here.
 
@@ -49,13 +49,13 @@ the missing label colours, the `CAN` code that matched nothing, the
 | GPU | Used when available; `device="cpu"` works and is much slower. CUDA falls back to CPU with a warning when no card is visible. |
 
 Structure codes: `MAND`, `MAX`, `CB`, `CV`, `UAW`, `SKIN`, `CBMASK`,
-`MANDMASK`, `MAXMASK` — published as the argument's `choices`, so a client can
+`MANDMASK`, `MAXMASK` -- published as the argument's `choices`, so a client can
 render them without a second declaration. The display names the old schema
 published ("Cranial base", …) are still accepted but not offered.
 
 `Literal` cannot be built from `catalog.STRUCTURE_CODES` (it takes literals
 only), so the set is written twice and a test asserts the two agree. A structure
-added to the catalog and not to `run()` would be unselectable from the client. `TEETH`, `RC` and `MCAN` are deliberately absent —
+added to the catalog and not to `run()` would be unselectable from the client. `TEETH`, `RC` and `MCAN` are deliberately absent --
 no model ships for them, and offering them produced either a KeyError during
 surface export or a silent collision onto the mandible's label.
 
@@ -72,8 +72,8 @@ Three behaviours worth knowing before reading a result:
 
 ## Versions
 
-Pinned to what the deployed server actually runs — torch 2.8.0+cu128,
-nnunetv2 2.8.1, SimpleITK 2.5.6, numpy 2.3.2, vtk 9.6.2, Python 3.11 — rather
+Pinned to what the deployed server actually runs -- torch 2.8.0+cu128,
+nnunetv2 2.8.1, SimpleITK 2.5.6, numpy 2.3.2, vtk 9.6.2, Python 3.11 -- rather
 than to upstream's declared torch 2.2.0 / nnunetv2 2.8.0.
 
 The reason is that no AMASSS result has ever been produced on upstream's pins.
@@ -85,7 +85,7 @@ nothing to validate it against. Upstream's numbers are recorded above, and
 moving to them is available to whoever wants to revalidate.
 
 The CUDA wheels come from an explicit index, and `explicit = true` is
-load-bearing — without it uv looks for every package on the PyTorch index:
+load-bearing -- without it uv looks for every package on the PyTorch index:
 
 ```toml
 [[tool.uv.index]]
@@ -114,8 +114,8 @@ across tools at build time.
   run-to-run spread.
 
 **nnUNet on CUDA is not bit-deterministic**, so a single comparison would have
-been meaningless. The reference was run four times and this package four times —
-eight runs of identical code, identical package versions and the same card — and
+been meaningless. The reference was run four times and this package four times --
+eight runs of identical code, identical package versions and the same card -- and
 both sets scatter across the same handful of states. 5 of the 16 port×reference
 pairs are bit-identical; the rest differ by the same margin two *reference* runs
 differ by:
@@ -127,7 +127,7 @@ differ by:
 | `_CB` | 1 900 614 | 41 | 41 | 0.999989 |
 | `_MERGED` | 5 131 306 | 66 | 68 | 0.999994 |
 
-- **Tolerance**: none of the difference is attributable to the repackaging —
+- **Tolerance**: none of the difference is attributable to the repackaging --
   port-vs-reference is indistinguishable from reference-vs-reference, to within
   one or two voxels in five million. The cause is nnUNet's sliding-window
   accumulation, a float reduction CUDA does not order deterministically;
@@ -136,7 +136,7 @@ differ by:
   regression**, and anything above it as this same noise floor.
 
 **GPU tests were run**: `uv run pytest -m models` with the real bundle on an
-RTX 6000 Ada — passed, all three structures predicted, merged volume carrying
+RTX 6000 Ada -- passed, all three structures predicted, merged volume carrying
 exactly labels {0, 1, 2, 4}. CI skips them (`-m "not gpu"`); the 48 remaining
 tests stub `nnunet_runner.predict_folder` and need no checkpoint.
 

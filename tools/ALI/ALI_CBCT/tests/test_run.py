@@ -23,11 +23,12 @@ import numpy as np
 import pytest
 import SimpleITK as sitk
 
-from sadt_ali_cbct import dispatch, markups, run
+from sadt_ali_cbct import dispatch, run
+from sadt_ali_common import markups
 from sadt_ali_cbct import catalog as cbct_catalog
 from sadt_ali_cbct.errors import ToolInputError, ToolUnavailableError
-from sadt_ali.ios import catalog as ios_catalog
-from sadt_ali.ios import engine as ios_engine
+
+
 
 ALL_REGIONS = list(cbct_catalog.REGION_NAMES)
 CRANIAL_BASE_ONLY = ["Cranial base"]
@@ -192,31 +193,10 @@ def test_an_unknown_region_is_refused_not_dropped():
         cbct_catalog.region_codes(["Cranial base", "Sagittal"])
 
 
-def test_ios_offers_only_landmark_types_a_model_predicts():
-    """R, RIP and OIP were selectable in the Slicer UI and predicted by
-    nothing: no network produced them and no label table contained them.
-    Ticking them did literally nothing."""
-    offered = {lm_type for types in ios_catalog.NETWORKS.values() for lm_type in types}
-    assert offered == {"O", "MB", "DB", "CL", "CB", "MG"}
-    assert not offered & {"R", "RIP", "OIP"}
 
 
-def test_ios_tooth_numbering_matches_the_shipped_label_tables():
-    assert ios_catalog.UNIVERSAL_NUMBERS["Upper"]["UL7"] == 15
-    assert ios_catalog.UNIVERSAL_NUMBERS["Upper"]["UR7"] == 2
-    assert ios_catalog.UNIVERSAL_NUMBERS["Lower"]["LL7"] == 18
-    assert ios_catalog.UNIVERSAL_NUMBERS["Lower"]["LR7"] == 31
-    # Tooth 8 is UR1: the occlusal network's three channels, in channel order.
-    assert ios_catalog.LABELS["O"]["8"] == ["UR1O", "UR1MB", "UR1DB"]
-    assert ios_catalog.LABELS["C"]["8"] == ["UR1CL", "UR1CB"]
 
 
-def test_ios_network_codes_from_a_selection():
-    assert ios_catalog.network_codes(["Occlusal"]) == ("O",)
-    assert ios_catalog.network_codes(["O"]) == ("O",)
-    assert ios_catalog.network_codes(None) == ios_catalog.NETWORK_CODES
-    with pytest.raises(ValueError, match="Occlusal"):
-        ios_catalog.network_codes(["Buccal"])
 
 
 # ---------------------------------------------------------------------------
@@ -236,15 +216,13 @@ def test_the_published_regions_are_the_catalogs_own():
     That makes the signature a second declaration of the same set, and this is
     what keeps the two honest: a region added to one and not the other would be
     unselectable from the client, or offered and then refused."""
-    assert _choices("cbct_regions") == list(cbct_catalog.REGION_NAMES)
+    assert _choices("regions") == list(cbct_catalog.REGION_NAMES)
 
 
 def test_the_published_landmarks_are_the_catalogs_own():
     assert _choices("landmarks") == list(cbct_catalog.LABELS)
 
 
-def test_the_published_networks_are_the_catalogs_own():
-    assert _choices("ios_networks") == list(ios_catalog.NETWORK_NAMES)
 
 
 def test_every_published_default_is_one_of_its_own_options():
@@ -252,7 +230,7 @@ def test_every_published_default_is_one_of_its_own_options():
     produce the value the tool starts from."""
     import inspect
 
-    for argument in ("cbct_regions", "ios_networks", "device"):
+    for argument in ("regions", "landmarks", "device"):
         default = inspect.signature(run).parameters[argument].default
         options = _choices(argument)
         for value in (default if isinstance(default, list) else [default]):
@@ -312,7 +290,9 @@ def test_an_input_with_nothing_recognizable_says_what_it_wanted(tmp_path):
 
     with pytest.raises(ToolInputError) as raised:
         dispatch.detect(str(tmp_path / "empty"), str(tmp_path / "work"))
-    assert ".vtk" in str(raised.value) and ".nii.gz" in str(raised.value)
+    # Volume extensions only: this tool no longer offers the surface half, so
+    # listing .vtk here would advertise something it refuses.
+    assert ".nii.gz" in str(raised.value)
 
 
 def test_detection_is_recursive(tmp_path):
@@ -446,55 +426,12 @@ def test_a_bundle_of_the_wrong_kind_is_an_input_error(tmp_path, cbct_environment
 # IOS model bundles and the tooth-label precondition
 # ---------------------------------------------------------------------------
 
-def test_ios_weight_discovery_reads_the_published_names(tmp_path):
-    """The real ALIDDM bundle: Upper_O_model.pth, Lower_C_model.pth, ..."""
-    bundle = write_ios_bundle(
-        tmp_path / "bundle",
-        ["Upper_O_model.pth", "Lower_O_model.pth", "Upper_C_model.pth", "Lower_C_model.pth"],
-    )
-    weights, unrecognized = ios_engine.discover_weights(bundle)
-
-    assert weights["O"].keys() == {"Upper", "Lower"}
-    assert weights["C"].keys() == {"Upper", "Lower"}
-    assert unrecognized == []
 
 
-def test_an_ios_checkpoint_with_no_jaw_token_is_reported_not_assumed_upper(tmp_path):
-    """The original treated every file not containing "Lower" as upper-jaw
-    weights, so a bundle missing its mandibular model quietly predicted the
-    lower arch with the maxillary one."""
-    bundle = write_ios_bundle(tmp_path / "bundle", ["model_O.pth", "Upper_C_model.pth"])
-    weights, unrecognized = ios_engine.discover_weights(bundle)
-
-    assert unrecognized == ["model_O.pth"]
-    assert "O" not in weights
-    assert weights["C"] == {"Upper": str(tmp_path / "bundle" / "Upper_C_model.pth")}
 
 
-def test_a_mesh_without_tooth_labels_names_the_tool_that_makes_them(tmp_path):
-    """The handoff `ALILogic.ensure_segmented()` used to make in-process.
-
-    Tools do not call each other any more, so this cannot segment the mesh
-    itself -- but it can say exactly what to run, which is the difference
-    between a fixable request and "no known tooth number is present".
-    """
-    labelled = write_surface(tmp_path / "in" / "good.vtk", labelled=True)
-    raw = write_surface(tmp_path / "in" / "raw.vtk", labelled=False)
-
-    with pytest.raises(ToolInputError) as raised:
-        ios_engine.require_labels([(labelled, "good.vtk"), (raw, "raw.vtk")])
-
-    message = str(raised.value)
-    assert "Crown_Seg" in message
-    assert "1 of 2" in message
-    # The array names it looked for, so the fix is actionable without reading
-    # the source.
-    assert "Universal_ID" in message
 
 
-def test_a_fully_labelled_batch_passes_the_check(tmp_path):
-    mesh = write_surface(tmp_path / "in" / "arch.vtk", labelled=True)
-    assert ios_engine.require_labels([(mesh, "arch.vtk")]) is None
 
 
 # ---------------------------------------------------------------------------
@@ -570,7 +507,7 @@ def test_a_cbct_run_writes_one_file_per_scan(tmp_path, stub_agent, cbct_environm
         input=tmp_path / "cohort",
         model=bundle,
         output_dir=tmp_path / "out",
-        cbct_regions=CRANIAL_BASE_ONLY,
+        regions=CRANIAL_BASE_ONLY,
     )
 
     report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
@@ -598,7 +535,7 @@ def test_run_returns_the_output_directory(tmp_path, stub_agent, cbct_environment
         input=tmp_path / "cohort",
         model=bundle,
         output_dir=tmp_path / "out",
-        cbct_regions=CRANIAL_BASE_ONLY,
+        regions=CRANIAL_BASE_ONLY,
     )
     assert returned == tmp_path / "out"
     assert returned.is_dir()
@@ -614,7 +551,7 @@ def test_nothing_is_written_beside_the_input(tmp_path, stub_agent, cbct_environm
         input=tmp_path / "cohort",
         model=bundle,
         output_dir=tmp_path / "out",
-        cbct_regions=CRANIAL_BASE_ONLY,
+        regions=CRANIAL_BASE_ONLY,
     )
 
     assert sorted(p for p in (tmp_path / "cohort").rglob("*") if p.is_file()) == before
@@ -629,7 +566,7 @@ def test_the_working_directory_does_not_survive_the_run(tmp_path, stub_agent, cb
         input=tmp_path / "cohort",
         model=bundle,
         output_dir=tmp_path / "out",
-        cbct_regions=CRANIAL_BASE_ONLY,
+        regions=CRANIAL_BASE_ONLY,
     )
     assert not (output_dir / dispatch.WORK_DIRNAME).exists()
 
@@ -644,7 +581,7 @@ def test_the_working_directory_is_removed_even_when_the_run_fails(tmp_path, cbct
             input=tmp_path / "cohort",
             model=empty_bundle,
             output_dir=tmp_path / "out",
-            cbct_regions=CRANIAL_BASE_ONLY,
+            regions=CRANIAL_BASE_ONLY,
         )
     assert not (tmp_path / "out" / dispatch.WORK_DIRNAME).exists()
 
@@ -660,7 +597,7 @@ def test_a_batch_keeps_its_tree_so_homonyms_cannot_collide(
         input=tmp_path / "cohort",
         model=bundle,
         output_dir=tmp_path / "out",
-        cbct_regions=CRANIAL_BASE_ONLY,
+        regions=CRANIAL_BASE_ONLY,
     )
 
     produced = sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*.mrk.json"))
@@ -689,7 +626,7 @@ def test_the_report_tells_a_missing_model_from_a_failed_search(
         input=tmp_path / "cohort",
         model=bundle,
         output_dir=tmp_path / "out",
-        cbct_regions=CRANIAL_BASE_ONLY,
+        regions=CRANIAL_BASE_ONLY,
     )
     report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
 
@@ -719,7 +656,7 @@ def test_a_landmark_that_never_converges_does_not_cost_the_others(
             input=tmp_path / "cohort",
             model=bundle,
             output_dir=tmp_path / "out",
-            cbct_regions=CRANIAL_BASE_ONLY,
+            regions=CRANIAL_BASE_ONLY,
         )
     finally:
         del cbct_catalog.LABEL_GROUPS["XN"]
@@ -836,44 +773,20 @@ def test_an_empty_cbct_selection_on_cbct_input_names_the_argument(tmp_path):
             input=tmp_path / "cohort",
             model=tmp_path,
             output_dir=tmp_path / "out",
-            cbct_regions=[],
+            regions=[],
         )
     message = str(raised.value)
-    assert "CBCT" in message and "cbct_regions" in message
+    # The argument as PUBLISHED. It read 'cbct_regions' until the split renamed
+    # it, so the message was telling a caller to fill a field the schema does
+    # not have.
+    assert "regions" in message
     # The message lists what to tick, so a mode mismatch explains itself.
     for name in cbct_catalog.REGION_NAMES:
         assert name in message
 
 
-def test_an_empty_ios_selection_on_ios_input_names_the_argument(tmp_path):
-    write_surface(tmp_path / "cohort" / "arch.vtk")
-
-    with pytest.raises(ToolInputError) as raised:
-        run(
-            input=tmp_path / "cohort",
-            model=tmp_path,
-            output_dir=tmp_path / "out",
-            modality="IOS",
-            ios_networks=[],
-        )
-    message = str(raised.value)
-    assert "ios_networks" in message and "Occlusal" in message
 
 
-def test_the_inactive_modes_empty_selection_is_ignored(tmp_path, stub_agent, cbct_environment):
-    """Both groups are always rendered by the client and one is always inert.
-    Emptying the inert one must not fail the run."""
-    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
-    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
-
-    output_dir = run(
-        input=tmp_path / "cohort",
-        model=bundle,
-        output_dir=tmp_path / "out",
-        ios_networks=[],
-    )
-    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
-    assert report["mode"] == "CBCT"
 
 
 # ---------------------------------------------------------------------------
@@ -1048,83 +961,18 @@ def test_the_real_cbct_bundle_places_landmarks_on_a_real_scan(tmp_path):
             assert low[axis] <= position[axis] <= high[axis], (label, axis, position)
 
 
-@pytest.mark.gpu
-@pytest.mark.models
-@pytest.mark.ios
-@pytest.mark.skipif(
-    not (REAL_IOS_MODELS and REAL_MESH),
-    reason="set SADT_ALI_IOS_MODELS and SADT_ALI_MESH, and `uv sync --extra ios`",
-)
-def test_the_real_ios_bundle_places_landmarks_on_a_real_mesh(tmp_path):
-    """The IOS half, which needs pytorch3d compiled -- see README."""
-    from pathlib import Path
-
-    output = run(
-        input=Path(REAL_MESH),
-        model=Path(REAL_IOS_MODELS),
-        output_dir=tmp_path / "out",
-        ios_networks=["Occlusal"],
-        device="cuda",
-    )
-
-    report = json.loads((output / dispatch.REPORT_NAME).read_text())
-    assert report["mode"] == "IOS"
-    assert report["summary"]["processed"] == 1
-    assert sorted(output.rglob("*.mrk.json"))
 
 
 # ---------------------------------------------------------------------------
 # Mucogingival
 # ---------------------------------------------------------------------------
 
-def test_mucogingival_is_offered_but_not_on_by_default():
-    """One point per lower tooth on the gingival margin, wanted by a mandible
-    registration and by nobody asking for crown landmarks. On by default would
-    add a third pass over every mesh of every existing request."""
-    import inspect
-
-    assert ios_catalog.NETWORK_NAMES["Mucogingival"] == "MG"
-    assert "Mucogingival" in _choices("ios_networks")
-    assert inspect.signature(run).parameters["ios_networks"].default == [
-        "Occlusal", "Cervical"
-    ]
 
 
-def test_mucogingival_runs_on_the_mandible_only():
-    """It was trained on the mandible alone, so a maxilla is not a missing
-    model -- it is a question the network cannot be asked."""
-    assert ios_catalog.NETWORK_JAWS["MG"] == ("Lower",)
-    # The other two are unrestricted, and must stay that way.
-    assert "O" not in ios_catalog.NETWORK_JAWS
-    assert "C" not in ios_catalog.NETWORK_JAWS
 
 
-def test_the_mucogingival_names_are_positional_not_derived():
-    """Six MG output names collide with the TRAINING name of a DIFFERENT tooth
-    -- LR1MG is the training name of tooth 25 and the output name of tooth 26 --
-    because tooth 25 carries the midline name L0MG and shifts the right side by
-    one. Deriving `<tooth><type>` here would mislabel half the arch."""
-    labels = ios_catalog.LABELS["MG"]
-
-    assert labels["19"] == ["LL6MG"]      # first trained tooth
-    assert labels["25"] == ["L0MG"]       # the midline, not "LR1MG"
-    assert labels["26"] == ["LR1MG"]      # shifted by one against the numbers
-    assert labels["31"] == ["LR6MG"]
-    # Tooth 18 was excluded from training and has no MG label at all.
-    assert "18" not in labels
-    assert len(labels) == 13 == len(ios_catalog.MG_TEETH)
 
 
-def test_every_mucogingival_tooth_has_an_aim_offset():
-    """The cameras aim at the landmark's expected position rather than at a
-    flat drop below the tooth centre, which only ever matched the incisors: on
-    the molars the landmark is ~0.15 further buccal and fell outside the render
-    entirely. A tooth with no offset would be back to that."""
-    assert set(ios_catalog.MG_AIM_OFFSET) == set(ios_catalog.MG_TEETH)
-    for tooth, offset in ios_catalog.MG_AIM_OFFSET.items():
-        assert len(offset) == 3, tooth
-        # Below the crown, always: the gingival margin is under it.
-        assert offset[2] < 0, tooth
 
 
 def test_a_degraded_landmark_carries_its_caveat_into_the_file(tmp_path):
@@ -1148,44 +996,28 @@ def test_a_degraded_landmark_carries_its_caveat_into_the_file(tmp_path):
     assert points["LL5MG"] == ""
 
 
-def test_a_declared_modality_the_data_contradicts_is_refused(tmp_path):
-    """The mode is still read from the DATA. `modality` exists so a client can
-    show one half of the panel at a time, and it is CHECKED rather than
-    believed: declaring CBCT over a folder of meshes would otherwise run the
-    wrong engine and call it a success."""
-    write_surface(tmp_path / "cohort" / "arch.vtk")
-
-    with pytest.raises(ToolInputError) as raised:
-        run(
-            input=tmp_path / "cohort",
-            model=tmp_path,
-            output_dir=tmp_path / "out",
-            modality="CBCT",
-        )
-    message = str(raised.value)
-    assert "IOS" in message and "CBCT" in message
 
 
-def test_a_declared_modality_that_agrees_runs(tmp_path, stub_agent, cbct_environment):
-    write_volume(tmp_path / "cohort" / "patient01.nii.gz")
-    bundle = write_cbct_bundle(tmp_path / "bundle", {"Cranial_Base": ["Ba"]})
-
-    output_dir = run(
-        input=tmp_path / "cohort", model=bundle, output_dir=tmp_path / "out",
-        modality="CBCT", cbct_regions=CRANIAL_BASE_ONLY,
-    )
-    report = json.loads((output_dir / dispatch.REPORT_NAME).read_text())
-    assert report["mode"] == "CBCT"
 
 
-def test_the_two_halves_of_the_panel_are_mutually_exclusive():
-    """The visual complaint this argument exists to fix: both engines'
-    selections were shown at once, so a CBCT user had to know which half to
-    ignore."""
-    from sadt_ali_cbct import layout
 
-    assert layout.LAYOUT["cbct_regions"]["visible_when"] == {"modality": "CBCT"}
-    assert layout.LAYOUT["landmarks"]["visible_when"] == {"modality": "CBCT"}
-    assert layout.LAYOUT["ios_networks"]["visible_when"] == {"modality": "IOS"}
-    # And the selector itself is always shown, at the top.
-    assert "visible_when" not in layout.LAYOUT["modality"]
+
+def test_an_intraoral_surface_is_refused_by_name(tmp_path):
+    """What the split put in place of the `modality` argument.
+
+    ALI used to be one tool that read the mode from the data; five tests here
+    drove that through `modality=`, and they went on existing after the split
+    because a stale import stopped this file from being collected at all. The
+    behaviour they were guarding is now this: the wrong kind of data is refused
+    before any inference, and the message names the tool that does handle it.
+    """
+    root = tmp_path / "scans"
+    root.mkdir()
+    write_surface(root / "patient.vtk")
+
+    with pytest.raises(ToolInputError) as caught:
+        dispatch.discover(str(root))
+
+    message = str(caught.value)
+    assert "intraoral surface" in message
+    assert "ALI_IOS" in message
