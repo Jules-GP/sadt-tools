@@ -89,7 +89,7 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
         # server. Sending them is for a folder that already has them, which also
         # lets a run be repeated without paying for the prediction again.
         if not mgl_landmarks:
-            tools.require(sup, "ALI", "Registering on the mucogingival line")
+            tools.require(sup, "ALI_IOS", "Registering on the mucogingival line")
         if height is not None and float(height) < 0:
             raise ToolInputError(
                 "'mgl_patch_height' is a half-height in millimetres and cannot be "
@@ -200,7 +200,7 @@ def _run_ios(
                     tools.predict_mucogingival(sup, root, mgl_model or ""),
                     landmark_root,
                 )
-            report["mgl_landmarks"] = "predicted by 'ALI'"
+            report["mgl_landmarks"] = "predicted by 'ALI_IOS'"
 
         painter = ios_pipeline.MGLPainter(landmark_root, height=mgl_patch_height)
         report["mgl_patch_height_mm"] = mgl_patch_height
