@@ -13,12 +13,23 @@ below appears in the panel with no client release.
 
 MODALITY_CBCT = "CBCT"
 MODALITY_IOS = "IOS"
+# Registering an intraoral scan onto a CBCT of the same patient -- a third
+# modality, not a mode of either. It was missing entirely until an audit against
+# upstream found it: upstream ships AREG_Method/IOSCBCT.py (829 lines) and three
+# method classes for it, and nothing on this side named it at all.
+MODALITY_IOSCBCT = "IOSCBCT"
 
-MODALITY_CHOICES = {MODALITY_CBCT: True, MODALITY_IOS: False}
+MODALITY_CHOICES = {MODALITY_CBCT: True, MODALITY_IOS: False, MODALITY_IOSCBCT: False}
 
 AUTOMATION_SEMI = "Semi-Automated"
 AUTOMATION_FULLY = "Fully-Automated"
 AUTOMATION_ORIENTED = "Oriented + Fully-Automated"
+# IOSCBCT only, and NOT the same thing as Semi-Automated: it takes the landmarks
+# already computed on both modalities and does the cross-modality registration
+# alone, predicting nothing. Upstream labels it plainly "Registration" in the
+# panel, against "Semi Automated Registration" and "Fully Automated
+# Registration" beside it.
+AUTOMATION_REGISTRATION = "Registration"
 
 # Fully-Automated is the default rather than the Slicer module's
 # Or_Auto_CBCT: the oriented mode additionally needs an orientation reference
@@ -28,6 +39,7 @@ AUTOMATION_CHOICES = {
     AUTOMATION_SEMI: False,
     AUTOMATION_FULLY: True,
     AUTOMATION_ORIENTED: False,
+    AUTOMATION_REGISTRATION: False,
 }
 
 # Which automation levels each modality actually has. The schema cannot say
@@ -37,6 +49,11 @@ AUTOMATION_CHOICES = {
 AUTOMATION_BY_MODALITY = {
     MODALITY_CBCT: (AUTOMATION_SEMI, AUTOMATION_FULLY, AUTOMATION_ORIENTED),
     MODALITY_IOS: (AUTOMATION_SEMI, AUTOMATION_FULLY),
+    # No "Oriented + Fully-Automated" here: orienting before registering is a
+    # CBCT step, and there is nothing to orient an intraoral scan onto in this
+    # mode. Its third value is Registration instead -- landmarks in, no
+    # prediction at all.
+    MODALITY_IOSCBCT: (AUTOMATION_SEMI, AUTOMATION_FULLY, AUTOMATION_REGISTRATION),
 }
 
 

@@ -1,0 +1,255 @@
+"""Everything AREG_IOSCBCT does around the registration itself.
+
+Three modes, and they differ only in where the landmarks come from:
+
+    Registration       you supply both sets. Nothing is predicted, no other
+                       tool is called, and this needs no GPU at all.
+    Semi-Automated     the intraoral meshes are labelled and the landmarks
+                       predicted; the CBCT is taken as it is.
+    Fully-Automated    the CBCT is oriented first, then both sides predicted.
+
+That progression is why this tool has no engine of its own: each step it does
+not do itself is a `sup.run()` into a tool that has one.
+"""
+
+import json
+import logging
+import os
+import shutil
+import time
+
+import numpy as np
+
+from sadt_areg_common import catalogs
+from sadt_areg_common.errors import ToolInputError
+
+from . import geometry, pipeline, tools
+
+logger = logging.getLogger(__name__)
+
+MODALITY = catalogs.MODALITY_IOSCBCT
+REPORT_NAME = "AREG_report.json"
+WORK_DIRNAME = ".areg_work"
+
+
+def _surface_points(path: str):
+    """The mesh's points, and the mesh, read once."""
+    import vtk
+    from vtk.util.numpy_support import vtk_to_numpy
+
+    reader = vtk.vtkPolyDataReader() if path.lower().endswith(".vtk") else vtk.vtkSTLReader()
+    reader.SetFileName(path)
+    if hasattr(reader, "ReadAllScalarsOn"):
+        reader.ReadAllScalarsOn()
+    reader.Update()
+    surface = reader.GetOutput()
+    return surface, vtk_to_numpy(surface.GetPoints().GetData())
+
+
+def _write_surface(surface, points, path: str) -> None:
+    import vtk
+    from vtk.util.numpy_support import numpy_to_vtk
+
+    moved = vtk.vtkPolyData()
+    moved.DeepCopy(surface)
+    array = numpy_to_vtk(np.ascontiguousarray(points, dtype=float), deep=True)
+    vtk_points = vtk.vtkPoints()
+    vtk_points.SetData(array)
+    moved.SetPoints(vtk_points)
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    writer = vtk.vtkPolyDataWriter()
+    writer.SetFileName(path)
+    writer.SetInputData(moved)
+    # Binary, not the writer's ASCII default: it round-trips float32 exactly
+    # while ASCII prints six significant digits, and it parses far faster.
+    writer.SetFileTypeToBinary()
+    writer.Write()
+
+
+def _landmarks_by_jaw(directory: str) -> dict:
+    """`{jaw hint: {label: position}}` for every landmark file in a folder."""
+    found = {}
+    if not directory or not os.path.isdir(directory):
+        return found
+    for root, _dirs, files in os.walk(directory):
+        for name in sorted(files):
+            if not name.lower().endswith(".json"):
+                continue
+            path = os.path.join(root, name)
+            points = pipeline.read_landmarks(path)
+            if points:
+                found[name] = points
+    return found
+
+
+_JAW_TOKENS = {"u", "upper", "l", "lower"}
+
+
+def _match_landmarks(mesh_path: str, candidates: dict) -> dict:
+    """The landmark set belonging to this mesh.
+
+    Two shapes, because the two sides genuinely differ and only one of them can
+    name a jaw:
+
+    - **per-jaw files**, which is what ALI_IOS writes (`..._U_lm_Pred.mrk.json`)
+      and what upstream's own RegTestFiles carry on both sides. Matched on the
+      jaw token, never on sort order: pairing by position is how an upper mesh
+      gets registered against a lower arch's points.
+    - **one file for everything**, which is what ALI_CBCT writes. A CBCT covers
+      both arches in one volume, so its landmark file has no jaw to name. The
+      labels themselves carry it -- `UR1O` against `LR1O` -- and
+      `shared_landmarks` intersects, so the upper mesh takes the upper points
+      out of the same file the lower mesh takes the lower ones from.
+
+    So a jaw match wins when there is one, and a single unlabelled file is
+    accepted as covering every jaw rather than refused.
+    """
+    from sadt_areg_common import pairing
+
+    mesh_tokens = set(pairing.tokens(os.path.basename(mesh_path)))
+    for name, points in sorted(candidates.items()):
+        if mesh_tokens & set(pairing.tokens(name)) & _JAW_TOKENS:
+            return points
+
+    unlabelled = [
+        points for name, points in sorted(candidates.items())
+        if not (set(pairing.tokens(name)) & _JAW_TOKENS)
+    ]
+    if len(unlabelled) == 1:
+        return unlabelled[0]
+    if len(candidates) == 1:
+        return next(iter(candidates.values()))
+    return {}
+
+
+def register(ios_dir: str, cbct_dir: str, ios_landmark_dir: str, cbct_landmark_dir: str,
+             output_dir: str, suffix: str, report: dict, max_dist: float) -> None:
+    """The registration proper, once every landmark exists."""
+    paired, unpaired = pipeline.discover(ios_dir, cbct_dir)
+    report["unpaired"] = unpaired
+
+    ios_landmarks = _landmarks_by_jaw(ios_landmark_dir)
+    cbct_landmarks = _landmarks_by_jaw(cbct_landmark_dir)
+    if not ios_landmarks or not cbct_landmarks:
+        raise ToolInputError(
+            "Both landmark folders must hold at least one file: found "
+            f"{len(ios_landmarks)} intraoral and {len(cbct_landmarks)} CBCT."
+        )
+
+    for patient, data in paired.items():
+        entry = {"cbct": os.path.basename(data["cbct"]), "meshes": {}}
+        for mesh_path in data["ios"]:
+            name = os.path.basename(mesh_path)
+            try:
+                moving = _match_landmarks(mesh_path, ios_landmarks)
+                fixed = _match_landmarks(mesh_path, cbct_landmarks)
+                if not moving or not fixed:
+                    raise ToolInputError(
+                        "No landmark file matches this mesh's jaw on "
+                        f"{'the intraoral' if not moving else 'the CBCT'} side."
+                    )
+                surface, points = _surface_points(mesh_path)
+                matrix, detail = pipeline.register_one(
+                    points, moving, fixed, max_dist=max_dist
+                )
+                destination = os.path.join(
+                    output_dir, patient, f"{os.path.splitext(name)[0]}_{suffix}.vtk"
+                )
+                _write_surface(surface, geometry.apply(points, matrix), destination)
+                np.save(destination.replace(".vtk", "_matrix.npy"), matrix)
+                entry["meshes"][name] = dict(
+                    detail, status="ok", output=os.path.relpath(destination, output_dir)
+                )
+            except Exception as exc:  # noqa: BLE001 - one mesh must not cost the batch
+                logger.exception("AREG_IOSCBCT failed on one mesh")
+                entry["meshes"][name] = {"status": "failed", "error": str(exc)}
+        registered = [m for m in entry["meshes"].values() if m["status"] == "ok"]
+        entry["status"] = "ok" if registered else "failed"
+        report["patients"][patient] = entry
+
+    produced = [p for p in report["patients"].values() if p["status"] == "ok"]
+    if not produced:
+        raise RuntimeError(
+            "AREG_IOSCBCT registered no mesh for any patient. The per-mesh errors "
+            "are in the report."
+        )
+
+
+def main(ios, cbct, output_dir, automation=None, ios_landmarks=None, cbct_landmarks=None,
+         cbct_reference=None, landmark_model=None, ios_landmark_model=None,
+         crown_model=None, max_dist=None, output_suffix="Reg", sup=None):
+    """Validate, fetch whatever the mode does not supply, then register."""
+    started_at = time.monotonic()
+    automation = str(automation or catalogs.AUTOMATION_REGISTRATION)
+    allowed = catalogs.AUTOMATION_BY_MODALITY[MODALITY]
+    if automation not in allowed:
+        raise ToolInputError(
+            f"'{automation}' is not a mode {MODALITY} has. It offers: {', '.join(allowed)}."
+        )
+
+    suffix = (output_suffix or "Reg").strip() or "Reg"
+    if os.sep in suffix or (os.altsep and os.altsep in suffix):
+        raise ToolInputError("'output_suffix' is a name fragment, not a path.")
+
+    output_dir = os.path.abspath(str(output_dir))
+    os.makedirs(output_dir, exist_ok=True)
+    work_dir = os.path.join(output_dir, WORK_DIRNAME)
+    os.makedirs(work_dir, exist_ok=True)
+
+    report = {
+        "modality": MODALITY,
+        "automation": automation,
+        "output_suffix": suffix,
+        "patients": {},
+    }
+
+    try:
+        ios_root, cbct_root = str(ios), str(cbct)
+        ios_lm = str(ios_landmarks) if ios_landmarks else None
+        cbct_lm = str(cbct_landmarks) if cbct_landmarks else None
+
+        if automation != catalogs.AUTOMATION_REGISTRATION:
+            # Everything the caller did not supply is fetched from the tool that
+            # produces it. Checked up front so a request that cannot work comes
+            # back in a second rather than after the first prediction.
+            for name in ("Crown_Seg", "ALI_IOS", "ALI_CBCT"):
+                tools.require(sup, name, f"{automation} IOSCBCT registration")
+            if automation == catalogs.AUTOMATION_FULLY:
+                tools.require(sup, "ASO", "Fully-Automated IOSCBCT registration")
+                if not cbct_reference:
+                    raise ToolInputError(
+                        "Fully-Automated orients the CBCT first and needs "
+                        "'cbct_reference'."
+                    )
+                cbct_root = tools.orient_cbct(sup, cbct_root, cbct_reference, landmark_model)
+
+            labelled = tools.label_crowns(sup, ios_root, crown_model or "")
+            if not ios_lm:
+                ios_lm = tools.predict_ios_landmarks(sup, labelled, ios_landmark_model or "")
+            if not cbct_lm:
+                cbct_lm = tools.predict_cbct_landmarks(sup, cbct_root, landmark_model or "")
+            ios_root = labelled
+
+        if not ios_lm or not cbct_lm:
+            raise ToolInputError(
+                "The Registration mode takes the landmarks already computed: send "
+                "both 'ios_landmarks' and 'cbct_landmarks', or use a mode that "
+                "predicts them."
+            )
+
+        register(
+            ios_dir=ios_root, cbct_dir=cbct_root,
+            ios_landmark_dir=ios_lm, cbct_landmark_dir=cbct_lm,
+            output_dir=output_dir, suffix=suffix, report=report,
+            max_dist=float(max_dist) if max_dist else geometry.DEFAULT_MAX_DIST,
+        )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    report["duration_seconds"] = round(time.monotonic() - started_at, 2)
+    with open(os.path.join(output_dir, REPORT_NAME), "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    logger.info("AREG_IOSCBCT: %d patient(s) in %.1fs",
+                len(report["patients"]), report["duration_seconds"])
+    return output_dir
