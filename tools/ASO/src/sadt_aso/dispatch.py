@@ -39,6 +39,7 @@ import os
 import shutil
 
 from . import catalogs
+from .scans import split_scan_extension
 from .cbct import dicom
 from .cbct import pipeline as cbct_pipeline
 from .errors import SupervisorRequired, ToolInputError
@@ -505,7 +506,7 @@ def _run_cbct(
     # mode they have to reach disk before it is called.
     prepared = {}
     for key, entry in sorted(patients.items()):
-        _, extension = cbct_pipeline.split_scan_extension(os.path.basename(entry["scan"]))
+        _, extension = split_scan_extension(os.path.basename(entry["scan"]))
         destination = (
             os.path.join(
                 centered_root,
