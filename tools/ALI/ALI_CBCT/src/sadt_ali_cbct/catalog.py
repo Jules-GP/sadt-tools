@@ -96,7 +96,7 @@ def group_of(label: str) -> str:
 
 
 def region_codes(selection) -> tuple:
-    """Turn what `run()` received for `cbct_regions` into region codes.
+    """Turn what `run()` received for `regions` into region codes.
 
     The published options are the display names ("Cranial base"), because that
     is what a client renders; the codes ("CB") are accepted too, so a caller
@@ -128,7 +128,7 @@ def region_codes(selection) -> tuple:
 def landmark_names(selection) -> tuple:
     """Turn what `run()` received for `landmarks` into canonical label names.
 
-    Empty is the normal case and means "not specified": `cbct_regions` decides.
+    Empty is the normal case and means "not specified": `regions` decides.
     Aliases are resolved here (`UR3OI` -> `UR3OIP`), the weights only ever using
     the canonical spelling.
 

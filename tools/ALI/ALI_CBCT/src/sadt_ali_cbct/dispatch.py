@@ -174,7 +174,7 @@ def identify(
     input_path: str,
     model_path: str,
     output_dir: str,
-    cbct_regions=None,
+    regions=None,
     landmarks=None,
     prediction_ID: str = "Pred",
     device: str = "cuda",
@@ -219,11 +219,11 @@ def identify(
         # them -- see engine.requested_landmarks for why, and for the eight-fold
         # cost that motivates it.
         chosen_landmarks = cbct_catalog.landmark_names(landmarks)
-        regions = cbct_catalog.region_codes(cbct_regions)
-        if not chosen_landmarks and not regions:
+        region_codes = cbct_catalog.region_codes(regions)
+        if not chosen_landmarks and not region_codes:
             # The cross-argument rule the schema cannot express.
             raise ToolInputError(
-                f"Select at least one region under 'cbct_regions' "
+                f"Select at least one region under 'regions' "
                 f"({', '.join(cbct_catalog.REGION_NAMES)}), or name the points you "
                 f"want under 'landmarks'."
             )
@@ -231,7 +231,7 @@ def identify(
         report = cbct_engine.predict_landmarks(
             scans=detected.scans,
             model_path=model_path,
-            regions=regions,
+            regions=region_codes,
             landmarks=chosen_landmarks,
             prediction_ID=prediction_ID,
             output_dir=output_dir,

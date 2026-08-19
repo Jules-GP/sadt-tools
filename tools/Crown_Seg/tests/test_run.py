@@ -153,7 +153,8 @@ def test_a_raw_mesh_is_segmented_and_reported(tmp_path, stub_shapeaxi):
     )
 
     assert report["summary"] == {
-        "total": 1, "segmented": 1, "already_segmented": 0, "failed": 0
+        "total": 1, "segmented": 1, "already_segmented": 0, "failed": 0,
+        "engine_unavailable": 0,
     }
     assert len(report["segmented_meshes"]) == 1
     assert pipeline.is_segmented(report["segmented_meshes"][0])
