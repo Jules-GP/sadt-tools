@@ -98,7 +98,7 @@ def _check_cbct(automation: str, regions: list, t1_masks, reference, sup=None) -
             raise ToolInputError(
                 "Oriented + Fully-Automated CBCT orients the T1 scans before "
                 "registering onto them, which needs an orientation reference: name "
-                "one in 'cbct_reference' (see GET /tools/AREG/data)."
+                "one in 'cbct_reference' (see GET /tools/AREG_CBCT/data)."
             )
 
 

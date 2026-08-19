@@ -98,7 +98,7 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
     elif not registration_model:
         raise ToolInputError(
             "Registering on the palate needs its patch-prediction checkpoint: name "
-            "one in 'registration_model' (see GET /tools/AREG/data)."
+            "one in 'registration_model' (see GET /tools/AREG_IOS/data)."
         )
 
     if automation != catalogs.AUTOMATION_FULLY:
@@ -109,7 +109,7 @@ def _check_ios(automation, patch, registration_model, reference, mgl_landmarks, 
         raise ToolInputError(
             "Fully-Automated IOS orients both timepoints before registering, which "
             "needs an orientation reference: name one in 'ios_reference' (see "
-            "GET /tools/AREG/data)."
+            "GET /tools/AREG_IOS/data)."
         )
 
 
