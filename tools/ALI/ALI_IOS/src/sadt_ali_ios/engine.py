@@ -26,7 +26,7 @@ import logging
 import os
 import time
 
-from .brain import import_torch, resolve_device
+from .torch_helpers import import_torch, resolve_device
 from .errors import ToolInputError, ToolUnavailableError
 from sadt_ali_common.markups import MARKUPS_EXTENSION
 from sadt_ali_common.markups import write as write_markups
@@ -439,23 +439,26 @@ def _predict_mucogingival(unet, renderer, mesh, tooth_number, label_name, vertic
 
     normal, aim = render.mg_frame(vertices, center, tangent, tooth_number, device)
 
-    with _GPU_SEMAPHORE:
-        images, pix_to_face = render.render_mg_views(
-            renderer=renderer,
-            mesh=mesh,
-            aim=aim,
-            directions=render.mg_camera_directions(normal, device),
-            radius=catalog.CAMERA_RADIUS["MG"],
-            device=device,
+    # The GPU semaphore went with the split: each tool is its own process now,
+    # so an in-process one serialised nothing. Its definition was removed and
+    # this use site survived -- a NameError on the mucogingival path, which had
+    # never run until AREG_IOSCBCT called it.
+    images, pix_to_face = render.render_mg_views(
+        renderer=renderer,
+        mesh=mesh,
+        aim=aim,
+        directions=render.mg_camera_directions(normal, device),
+        radius=catalog.CAMERA_RADIUS["MG"],
+        device=device,
+    )
+    # The three views become the 12 channels of ONE input, not a batch of
+    # three: (1, 3, 4, H, W) -> (1, 12, H, W).
+    views = images[0].unsqueeze(0)
+    batch, cameras, channels, height, width = views.shape
+    with torch.no_grad():
+        predictions = unet(
+            views.reshape(batch, cameras * channels, height, width).float().to(device)
         )
-        # The three views become the 12 channels of ONE input, not a batch of
-        # three: (1, 3, 4, H, W) -> (1, 12, H, W).
-        views = images[0].unsqueeze(0)
-        batch, cameras, channels, height, width = views.shape
-        with torch.no_grad():
-            predictions = unet(
-                views.reshape(batch, cameras * channels, height, width).float().to(device)
-            )
 
     # argmax on the raw scores. Casting the logits to int16 first -- what the
     # crown path inherited and this deliberately does not -- truncates every

@@ -136,7 +136,7 @@ def surface_properties(scaled_surface, device):
     found and the run ends reporting no landmarks with no reason given. The
     engine checks every mesh for labels up front, so this is the backstop.
     """
-    from .brain import import_torch
+    from .torch_helpers import import_torch
 
     torch = import_torch()
     _, vtk_to_numpy = import_vtk()
