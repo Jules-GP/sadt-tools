@@ -18,11 +18,20 @@ jobs:
     outputs:
       tools: ${{ steps.list.outputs.tools }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: list
         run: |
-          tools=$(find tools -mindepth 2 -maxdepth 2 -name pyproject.toml -printf '%h\n' \
-            | xargs -r -n1 basename | sort | jq -R . | jq -sc .)
+          # Depth 2 AND 3, and keyed on [tool.sadt], which is the same rule
+          # the server's registry and the deployment Dockerfile use. Depth 2
+          # alone stopped matching when ALI and AREG became grouping folders:
+          # CI went on testing six tools and silently dropped the five the
+          # splits produced -- which is where the stale tests were found, months
+          # later, by hand. [tool.sadt] also drops _template, which CI was
+          # testing and no server ever serves.
+          tools=$(find tools -mindepth 2 -maxdepth 3 -name pyproject.toml -printf '%h\n' \
+            | while read -r dir; do
+                grep -q '^\[tool.sadt\]' "$dir/pyproject.toml" && echo "$dir"
+              done | sed 's|^tools/||' | sort | jq -R . | jq -sc .)
           echo "tools=$tools" >> "$GITHUB_OUTPUT"
           echo "matrix: $tools"
 
@@ -37,8 +46,8 @@ jobs:
       matrix:
         tool: ${{ fromJson(needs.discover.outputs.tools) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -67,8 +76,8 @@ jobs:
   scripts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
       # --no-project: scripts/ is deliberately not a package. There is no
@@ -84,8 +93,8 @@ jobs:
   testkit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
       - name: Build the template it runs against
