@@ -80,7 +80,7 @@ def stub_nnunet(monkeypatch):
 # Catalog
 # ---------------------------------------------------------------------------
 
-# NOTE: the server-side suite also asserted every catalog key appears in
+# The server-side suite also asserted every catalog key appears in
 # `scripts/data-manifest.yml`, because a key that drifts from the manifest makes
 # an installed model unselectable. That file lives in the server repository and
 # a tool package cannot reach it, so the check is gone and the contract is now
