@@ -497,3 +497,22 @@ class TestArgumentRules:
     def test_a_supervisor_makes_the_same_mode_acceptable(self):
             assert tools.require(FakeSup("/tmp"), "AMASSS", "anything") is None
 
+
+
+def test_fully_automated_without_segmentation_weights_is_refused_up_front():
+    """AMASSS receives None otherwise, and fails on
+
+        TypeError: expected str, bytes or os.PathLike object, not NoneType
+
+    fifteen seconds in, inside a child process, reaching the caller as "Tool
+    execution failed". The tool is reachable; what is missing is which weights.
+    """
+    with pytest.raises(ToolInputError, match="segmentation_model"):
+        dispatch._check_cbct(
+            automation=catalogs.AUTOMATION_FULLY,
+            regions=["Cranial base"],
+            t1_masks=None,
+            reference=None,
+            segmentation_model=None,
+            sup=FakeSup("/tmp/areg-rules"),
+        )

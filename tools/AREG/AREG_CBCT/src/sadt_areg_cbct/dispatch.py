@@ -71,7 +71,8 @@ class RegistrationRun:
 
 
 
-def _check_cbct(automation: str, regions: list, t1_masks, reference, sup=None) -> None:
+def _check_cbct(automation: str, regions: list, t1_masks, reference,
+                segmentation_model=None, sup=None) -> None:
     if not regions:
         raise ToolInputError(
             "Select at least one anatomical region to register on in 'cbct_regions' "
@@ -100,6 +101,18 @@ def _check_cbct(automation: str, regions: list, t1_masks, reference, sup=None) -
                 "registering onto them, which needs an orientation reference: name "
                 "one in 'cbct_reference' (see GET /tools/AREG_CBCT/data)."
             )
+
+    if not segmentation_model:
+        # Named here rather than left to AMASSS, which receives None and fails on
+        # `TypeError: expected str, bytes or os.PathLike object, not NoneType` --
+        # fifteen seconds in, from inside a child process, and opaque to whoever
+        # sent the request. The tool is reachable; what is missing is which
+        # weights it should load.
+        raise ToolInputError(
+            f"{automation} CBCT segments the T1 scans before registering, which "
+            f"needs the segmentation weights: name a bundle in "
+            f"'segmentation_model' (see GET /tools/AREG_CBCT/data)."
+        )
 
 
 def _run_cbct(
@@ -380,7 +393,7 @@ def main(
 
     regions = _selected(cbct_regions, catalogs.REGION_CHOICES)
     reference = cbct_reference
-    _check_cbct(automation, regions, t1_masks, reference, sup)
+    _check_cbct(automation, regions, t1_masks, reference, segmentation_model, sup)
 
     run = register(
         t1_path=str(t1),
