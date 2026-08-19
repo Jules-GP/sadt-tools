@@ -565,7 +565,20 @@ server keeps working off its copy until this one is proven.
 ```bash
 uv run --no-project --python 3.12 --with pytest -- pytest scripts/tests -q
 uv run scripts/audit.py
+uv run --no-project --python 3.11 --with pyflakes -- python -m pyflakes tools/*/src tools/*/*/src
 ```
+
+**pyflakes, and specifically for undefined names.** An import proves a module
+loads; it says nothing about a name referenced inside a branch only a real run
+reaches, and that is exactly where this repository keeps finding them. Splitting
+ALI left four such defects — a constant whose import went with the block that
+defined it, a module that moved to the other engine, a dependency dropped from a
+pyproject, and a semaphore whose definition was removed while one use survived.
+All four passed `import`, all four passed schema generation, and the first three
+were found one per run until a single pyflakes sweep found the rest at once.
+
+Run it across every tool, including the ones nested under a grouping folder —
+`tools/*/src tools/*/*/src` covers both depths.
 
 `audit.py` is read-only by design: it reports distinct torch and Python versions
 and what dropping one would save, and it never edits a lockfile. Aligning two
