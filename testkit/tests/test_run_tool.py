@@ -151,7 +151,14 @@ def test_tool_schema_reads_what_the_server_would_publish():
     schema = tool_schema(TEMPLATE)
 
     assert schema["name"] == TEMPLATE
-    assert schema["arguments"]["scans"] == {"type": "path", "required": True}
+    scans = schema["arguments"]["scans"]
+    assert scans["type"] == "path"
+    assert scans["required"] is True
+    # Compared key by key rather than as a whole dict: the schema gains keys as
+    # the contract grows -- `description`, read from run()'s Args: section, was
+    # the one that broke this -- and what this test is about is the argument
+    # still being called `scans` and still being a required path.
+    assert scans["description"]
     assert schema["arguments"]["metrics"]["choices"] == ["mean", "max", "min", "std"]
     assert schema["returns"] == "path"
     assert len(schema["source_hash"]) == 64

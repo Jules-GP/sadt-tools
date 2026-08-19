@@ -45,6 +45,14 @@ GOOD = """
         \"\"\"Segment craniofacial structures on a CBCT scan.
 
         A second paragraph never reaches the client.
+
+        Args:
+            scan: The CBCT to segment.
+            output_dir: Where the masks are written.
+            structures: Which structures to segment.
+            crop: Crop each mask to the structure it holds, rather
+                than to the whole scan.
+            margin: How much the crop leaves around it, in millimetres.
         \"\"\"
         return output_dir
 """
@@ -65,12 +73,21 @@ def test_schema_matches_the_signature(tmp_path):
         "crop",
         "margin",
     ], "argument order follows the signature, so the client's form does too"
-    assert schema["arguments"]["scan"] == {"type": "path", "required": True}
+    assert schema["arguments"]["scan"] == {
+        "type": "path",
+        "required": True,
+        "description": "The CBCT to segment.",
+    }
     assert schema["arguments"]["structures"] == {
         "type": "list[str]",
         "required": False,
         "default": ["Mandible", "Maxilla"],
+        "description": "Which structures to segment.",
     }
+    # Wrapped over two source lines, one sentence by the time a panel shows it.
+    assert schema["arguments"]["crop"]["description"] == (
+        "Crop each mask to the structure it holds, rather than to the whole scan."
+    )
     # Declared float, defaulted with an int literal: the client must still get
     # a float widget with a float default.
     assert schema["arguments"]["margin"]["default"] == 1.0
@@ -213,7 +230,14 @@ def test_literal_publishes_choices(tmp_path):
         '    merge: Literal["MERGED", "SEPARATE"] = "MERGED",\n'
         "    folds: list[Literal[0, 1, 2]] = [0],\n"
         ") -> Path:\n"
-        '    """Segment a scan."""\n'
+        '    """Segment a scan.\n'
+        "\n"
+        "    Args:\n"
+        "        scan: The scan.\n"
+        "        structures: Which structures.\n"
+        "        merge: One file or several.\n"
+        "        folds: Which folds.\n"
+        '    """\n'
         "    return scan\n",
     )
     schema = json.loads(describe(tool).stdout)
@@ -223,12 +247,14 @@ def test_literal_publishes_choices(tmp_path):
         "required": False,
         "default": ["MAND", "MAX"],
         "choices": ["MAND", "MAX", "CB"],
+        "description": "Which structures.",
     }
     assert schema["arguments"]["merge"] == {
         "type": "str",
         "required": False,
         "default": "MERGED",
         "choices": ["MERGED", "SEPARATE"],
+        "description": "One file or several.",
     }
     assert schema["arguments"]["folds"]["type"] == "list[int]"
     assert schema["arguments"]["folds"]["choices"] == [0, 1, 2]
@@ -240,12 +266,19 @@ def test_choices_come_last_so_keys_stay_stable(tmp_path):
         tmp_path,
         "from typing import Literal\n\n"
         'def run(scan: Path, mode: Literal["a", "b"] = "a") -> Path:\n'
-        '    """Do a thing."""\n'
+        '    """Do a thing.\n'
+        "\n"
+        "    Args:\n"
+        "        scan: The scan.\n"
+        "        mode: Which mode.\n"
+        '    """\n'
         "    return scan\n",
     )
     schema = json.loads(describe(tool).stdout)
 
-    assert list(schema["arguments"]["mode"]) == ["type", "required", "default", "choices"]
+    assert list(schema["arguments"]["mode"]) == [
+        "type", "required", "default", "choices", "description",
+    ]
 
 
 def test_a_required_argument_may_still_carry_choices(tmp_path):
@@ -253,13 +286,19 @@ def test_a_required_argument_may_still_carry_choices(tmp_path):
         tmp_path,
         "from typing import Literal\n\n"
         'def run(scan: Path, mode: Literal["a", "b"]) -> Path:\n'
-        '    """Do a thing."""\n'
+        '    """Do a thing.\n'
+        "\n"
+        "    Args:\n"
+        "        scan: The scan.\n"
+        "        mode: Which mode.\n"
+        '    """\n'
         "    return scan\n",
     )
     assert json.loads(describe(tool).stdout)["arguments"]["mode"] == {
         "type": "str",
         "required": True,
         "choices": ["a", "b"],
+        "description": "Which mode.",
     }
 
 
@@ -320,7 +359,11 @@ def test_dict_of_paths_is_accepted_for_several_outputs(tmp_path):
     tool = make_tool(
         tmp_path,
         "def run(scan: Path) -> dict[str, Path]:\n"
-        '    """Segment and align a scan."""\n'
+        '    """Segment and align a scan.\n'
+        "\n"
+        "    Args:\n"
+        "        scan: The scan.\n"
+        '    """\n'
         "    return {}\n",
     )
     assert json.loads(describe(tool).stdout)["returns"] == "dict[str, path]"
@@ -361,12 +404,108 @@ def test_the_template_describes_itself(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The per-argument help, read from the docstring
+# ---------------------------------------------------------------------------
+
+
+def test_an_undocumented_argument_fails(tmp_path):
+    """The whole reason this check exists: descriptions were published nowhere
+    for months and nothing said so, because an empty one reads as a tool that
+    simply has nothing to add."""
+    result = describe(make_tool(
+        tmp_path,
+        "def run(scan: Path, margin: float = 1.0) -> Path:\n"
+        '    """Do a thing.\n'
+        "\n"
+        "    Args:\n"
+        "        scan: The scan.\n"
+        '    """\n'
+        "    return scan\n",
+    ))
+
+    assert result.returncode == 2
+    assert "no description for margin" in result.stderr
+    assert result.stdout == ""
+
+
+def test_documenting_an_argument_run_does_not_take_fails(tmp_path):
+    """The drift case: an argument renamed in the signature and not in the
+    docstring leaves help text that describes something that is gone."""
+    result = describe(make_tool(
+        tmp_path,
+        "def run(scan: Path) -> Path:\n"
+        '    """Do a thing.\n'
+        "\n"
+        "    Args:\n"
+        "        scan: The scan.\n"
+        "        margin: Removed two releases ago.\n"
+        '    """\n'
+        "    return scan\n",
+    ))
+
+    assert result.returncode == 2
+    assert "margin" in result.stderr and "does not take" in result.stderr
+
+
+def test_a_docstring_with_no_args_section_fails(tmp_path):
+    result = describe(make_tool(
+        tmp_path,
+        'def run(scan: Path) -> Path:\n    """Do a thing."""\n    return scan\n',
+    ))
+
+    assert result.returncode == 2
+    assert "no 'Args:' section" in result.stderr
+
+
+def test_the_type_may_be_repeated_in_the_docstring_and_is_dropped(tmp_path):
+    """`scan (Path):` is the other common Google style. The annotation is the
+    truth about the type, so the parenthesis is read and thrown away rather
+    than shipped to a client as part of the sentence."""
+    schema = json.loads(describe(make_tool(
+        tmp_path,
+        "def run(scan: Path) -> Path:\n"
+        '    """Do a thing.\n'
+        "\n"
+        "    Args:\n"
+        "        scan (Path): The scan.\n"
+        '    """\n'
+        "    return scan\n",
+    )).stdout)
+
+    assert schema["arguments"]["scan"]["description"] == "The scan."
+
+
+def test_a_later_section_does_not_leak_into_the_last_description(tmp_path):
+    """Returns: follows Args: in every docstring in this repository."""
+    schema = json.loads(describe(make_tool(
+        tmp_path,
+        "def run(scan: Path) -> Path:\n"
+        '    """Do a thing.\n'
+        "\n"
+        "    Args:\n"
+        "        scan: The scan.\n"
+        "\n"
+        "    Returns:\n"
+        "        The scan, done to.\n"
+        '    """\n'
+        "    return scan\n",
+    )).stdout)
+
+    assert schema["arguments"]["scan"]["description"] == "The scan."
+
+
+# ---------------------------------------------------------------------------
 # The supervisor -- how a tool calls another tool
 # ---------------------------------------------------------------------------
 
 SUPERVISED = """
     def run(scan: Path, output_dir: Path, *, sup=None) -> Path:
-        \"\"\"Orient a scan onto a reference.\"\"\"
+        \"\"\"Orient a scan onto a reference.
+
+        Args:
+            scan: The scan to orient.
+            output_dir: Where the oriented scan is written.
+        \"\"\"
         return output_dir
 """
 
@@ -438,7 +577,14 @@ LAYOUT_TOOL = """
     def run(scans: Path, output_dir: Path,
             mode: Literal["CBCT", "IOS"] = "CBCT",
             parts: list[Literal["a", "b", "c"]] = ["a"]) -> Path:
-        \"\"\"Do a thing.\"\"\"
+        \"\"\"Do a thing.
+
+        Args:
+            scans: The scans to do it to.
+            output_dir: Where the results are written.
+            mode: Which kind of data this is.
+            parts: Which parts to do it to.
+        \"\"\"
         return output_dir
 """
 
@@ -547,7 +693,12 @@ REQUIRES_LITERAL = """
         tools.require(sup, "AMASSS", "Fully-Automated registration")
 
     def run(scan: Path, output_dir: Path, *, sup=None) -> Path:
-        \"\"\"Register two timepoints.\"\"\"
+        \"\"\"Register two timepoints.
+
+        Args:
+            scan: The scan to register.
+            output_dir: Where the result is written.
+        \"\"\"
         _preflight(sup)
         return output_dir
 """
@@ -558,7 +709,12 @@ REQUIRES_LOOP = """
             tools.require(sup, name, "Fully-Automated registration")
 
     def run(scan: Path, output_dir: Path, *, sup=None) -> Path:
-        \"\"\"Register two timepoints.\"\"\"
+        \"\"\"Register two timepoints.
+
+        Args:
+            scan: The scan to register.
+            output_dir: Where the result is written.
+        \"\"\"
         _preflight(sup)
         return output_dir
 """
