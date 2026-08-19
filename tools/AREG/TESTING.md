@@ -1,11 +1,12 @@
-# Test data
+# AREG: how the three tools are tested
 
 Nothing is committed here. The suite builds its own 48³ synthetic phantoms with
 SimpleITK, moves them by a known rigid transform, and checks the recovered
 transform against it -- `itk-elastix` is a wheel and fast enough on a phantom
 that the CBCT registration is exercised for real rather than mocked.
 
-That covers all 88 tests. The IOS patch network is stubbed; it needs pytorch3d
+Each of the three tools now runs its own share of them in its own
+virtualenv (AREG_CBCT 25, AREG_IOS 53, AREG_IOSCBCT 1). The IOS patch network is stubbed; it needs pytorch3d
 and a checkpoint.
 
 ## What the supervised chain would need

@@ -1,17 +1,10 @@
-"""AREG's unit tests: no GPU, no weights, no network.
+"""AREG_IOS's unit tests: no GPU, no weights, no network.
 
-The IOS patch network is stubbed (it needs a checkpoint and pytorch3d);
-everything around it runs for real, including the CBCT engine end to end
-against synthetic volumes -- elastix is fast enough on a 48^3 phantom that the
-registration itself is tested rather than mocked.
+Split out of the single `tools/AREG/tests/test_run.py` AREG had before it
+became three tools; see AREG_CBCT/tests/test_run.py for why none of them ran.
 
-The four tools AREG drives are stood in for by a fake supervisor, which is all
-a tool can see of them: five members, duck-typed, nothing imported across
-venvs.
-
-Each test that pins a fixed defect says which one in its docstring.
-
-    cd tools/AREG && uv run pytest
+The patch network is stubbed (it needs a checkpoint and pytorch3d); everything
+around it runs for real.
 """
 
 import json
@@ -21,9 +14,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 import SimpleITK as sitk
+import vtk
 
-from sadt_areg import catalogs, dispatch, pairing, run, tools
-from sadt_areg.errors import SupervisorRequired, ToolInputError
+from sadt_areg_ios import butterfly, icp, mgl, orientation, postprocess, surfaces
+from sadt_areg_ios import butterfly as butterfly_module
+from sadt_areg_ios import dispatch, landmarks as landmark_files, run, tools
+from sadt_areg_ios import pipeline as ios_pipeline
+from sadt_areg_common import catalogs, pairing
+from sadt_areg_common.errors import SupervisorRequired, ToolInputError
 
 
 class FakeSup:
@@ -55,10 +53,6 @@ class FakeSup:
     def log(self, message):
         self.messages.append((None, message))
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 def _phantom(size=48, seed=0, spacing=0.8, origin=(-140.0, -90.0, 60.0)):
     """A textured volume with an origin far from zero.
@@ -110,607 +104,6 @@ def _full_mask(image):
     return mask
 
 
-# ---------------------------------------------------------------------------
-# Pairing
-# ---------------------------------------------------------------------------
-
-class TestPairing:
-    def test_the_timepoint_token_is_what_pairs_two_folders(self):
-        assert pairing.patient_stem("P1_T1_scan.nii.gz") == "P1"
-        assert pairing.patient_stem("P1_T2.nii.gz") == "P1"
-        assert pairing.patient_stem("T1_01_U_Seg.vtk") == "01_U"
-
-    def test_a_name_with_a_dot_in_it_survives(self):
-        """FIX: `basename.split(".")[0]` truncated at the FIRST dot, so
-        `P1.2_scan.nii.gz` and `P1.7_scan.nii.gz` were the same patient."""
-        assert pairing.patient_stem("P1.2_scan.nii.gz") == "P1_2"
-        assert pairing.patient_stem("P1.7_scan.nii.gz") == "P1_7"
-
-    def test_two_subfolders_may_hold_the_same_file_name(self, tmp_path):
-        """FIX: `GetPatients` keyed on the base name, so `scan.nii.gz` under
-        two subject folders became one patient -- in the working dict and again
-        in the flat output folder."""
-        image = _phantom(size=16)
-        for subject in ("A", "B"):
-            _write(image, str(tmp_path / "T1" / subject / "scan_T1.nii.gz"))
-            _write(image, str(tmp_path / "T2" / subject / "scan_T2.nii.gz"))
-
-        matched = pairing.pair(str(tmp_path / "T1"), str(tmp_path / "T2"), "Reg")
-        assert sorted(matched.matched) == [os.path.join("A", "scan"), os.path.join("B", "scan")]
-
-    def test_a_subject_present_at_one_timepoint_only_is_named(self, tmp_path):
-        image = _phantom(size=16)
-        _write(image, str(tmp_path / "T1" / "P1_T1.nii.gz"))
-        _write(image, str(tmp_path / "T1" / "P2_T1.nii.gz"))
-        _write(image, str(tmp_path / "T2" / "P1_T2.nii.gz"))
-
-        matched = pairing.pair(str(tmp_path / "T1"), str(tmp_path / "T2"), "Reg")
-        assert list(matched.matched) == ["P1"]
-        assert matched.unmatched_report()["t1_without_t2"] == ["P2"]
-
-    def test_a_previous_run_is_not_re_registered(self, tmp_path):
-        """FIX: `P1_CB_Reg.nii.gz` sorts before `P1_scan.nii.gz`, so a second
-        run on the same folder took the first run's output as its input."""
-        image = _phantom(size=16)
-        _write(image, str(tmp_path / "T2" / "P1_CB_Reg.nii.gz"))
-        _write(image, str(tmp_path / "T2" / "P1_scan_T2.nii.gz"))
-
-        found = pairing.discover(str(tmp_path / "T2"), "Reg")
-        assert found["P1"].endswith("P1_scan_T2.nii.gz")
-
-    def test_the_suffix_is_matched_as_a_token_not_a_substring(self):
-        """A patient called Regina is not a previous run of suffix 'Reg'."""
-        assert pairing.is_previous_output("P1_Reg.nii.gz", "Reg")
-        assert pairing.is_previous_output("P1_Reg_transform.tfm", "Reg")
-        assert not pairing.is_previous_output("Regina_T1.nii.gz", "Reg")
-
-
-class TestMaskDiscovery:
-    def test_a_cbct_in_the_name_is_not_a_cranial_base_mask(self, tmp_path):
-        """FIX: the region test was `"cb" in basename.lower()`, which makes
-        every file whose name contains CBCT a cranial-base mask."""
-        image = _phantom(size=16)
-        _write(image, str(tmp_path / "P1_CBCT_seg.nii.gz"))
-        assert pairing.discover_masks(str(tmp_path), "CB") == {}
-
-    def test_a_mask_keys_to_the_patient_its_scan_keys_to(self, tmp_path):
-        image = _phantom(size=16)
-        _write(image, str(tmp_path / "masks" / "P1_T1_MAND_seg.nii.gz"))
-        found = pairing.discover_masks(str(tmp_path / "masks"), "MAND")
-        assert list(found) == ["P1"]
-
-    def test_a_mask_has_to_say_both_what_it_is_and_what_it_covers(self, tmp_path):
-        image = _phantom(size=16)
-        _write(image, str(tmp_path / "P1_MAND.nii.gz"))       # no seg token
-        _write(image, str(tmp_path / "P2_seg.nii.gz"))        # no region token
-        _write(image, str(tmp_path / "P3_MAND_seg.nii.gz"))   # both
-        assert list(pairing.discover_masks(str(tmp_path), "MAND")) == ["P3"]
-
-    def test_amasss_output_names_are_recognised(self, tmp_path):
-        """What the Fully-Automated path actually has to read back."""
-        image = _phantom(size=16)
-        _write(image, str(tmp_path / "P1_T1_scan_seg_MANDMASK.nii.gz"))
-        found = pairing.discover_masks(str(tmp_path), "MAND")
-        assert list(found) == ["P1"]
-
-
-# ---------------------------------------------------------------------------
-# The CBCT engine
-# ---------------------------------------------------------------------------
-
-elastix = pytest.importorskip(
-    "sadt_areg.cbct.elastix", reason="the CBCT engine needs itk-elastix"
-)
-try:
-    elastix.check_dependencies()
-except Exception as exc:  # pragma: no cover - depends on the deployment
-    pytest.skip(f"itk-elastix unavailable: {exc}", allow_module_level=True)
-
-
-class TestElastix:
-    def test_the_centre_of_rotation_is_honoured(self):
-        """FIX, and the headline one: `MatrixRetrieval` read elastix's three
-        angles and its translation and DROPPED its CenterOfRotationPoint, so
-        the SimpleITK transform it built rotated about the physical origin
-        instead. The two differ by (I - R)c -- invisible on centred data,
-        metres-per-radian off the further the scan sits from the origin.
-
-        Measured here against a known ground truth on a phantom whose origin is
-        at (-140, -90, 60) mm: the centre-dropping version lands several
-        millimetres out, this one lands within a fifth of a voxel.
-        """
-        fixed = _phantom(size=48)
-        moving, truth = _moved(fixed)
-
-        transform = elastix.register(fixed, moving)
-
-        # The transform elastix returns maps FIXED space to MOVING space, which
-        # is the direction sitk's resampler consumes -- and here that is `truth`
-        # itself, since `moving` is `fixed` displaced by it.
-        probes = [
-            fixed.TransformContinuousIndexToPhysicalPoint([float(v) for v in index])
-            for index in ([0, 0, 0], [24, 24, 24], [47, 47, 47], [4, 40, 12])
-        ]
-        errors = [
-            np.linalg.norm(
-                np.array(transform.TransformPoint(p)) - np.array(truth.TransformPoint(p))
-            )
-            for p in probes
-        ]
-        assert max(errors) < 0.2, f"registration is {max(errors):.3f} mm from the truth"
-
-        # And the shipped behaviour, reconstructed, is not: dropping the centre
-        # is a real displacement, not a rounding difference.
-        without_centre = sitk.Euler3DTransform()
-        without_centre.SetRotation(*transform.GetParameters()[:3])
-        without_centre.SetTranslation(transform.GetParameters()[3:6])
-        dropped = max(
-            np.linalg.norm(
-                np.array(without_centre.TransformPoint(p)) - np.array(truth.TransformPoint(p))
-            )
-            for p in probes
-        )
-        assert dropped > 1.0, "the phantom is too centred for this test to mean anything"
-
-    def test_a_mask_of_a_different_size_is_refused(self):
-        """FIX: `fixed_seg.SetOrigin(fixed_image.GetOrigin())` forced the two
-        into agreement unconditionally, so a mask that is genuinely a different
-        sampling of the patient was applied several millimetres off in
-        silence."""
-        image = _phantom(size=24)
-        mask = _full_mask(_phantom(size=20))
-        with pytest.raises(elastix.RegistrationError, match="not the same sampling"):
-            elastix.apply_mask(image, mask)
-
-    def test_a_label_the_mask_does_not_hold_is_refused(self):
-        """FIX: `if label is not None and label in np.unique(array)` fell
-        through to using the WHOLE mask when the label was absent -- asking for
-        label 4 of a two-label mask registered on everything and reported
-        success."""
-        image = _phantom(size=24)
-        with pytest.raises(elastix.RegistrationError, match="no label 4"):
-            elastix.apply_mask(image, _full_mask(image), label=4)
-
-    def test_a_multi_label_mask_used_whole_says_so(self):
-        image = _phantom(size=24)
-        array = np.zeros(sitk.GetArrayViewFromImage(image).shape, np.uint8)
-        array[4:12] = 1
-        array[12:18] = 2
-        mask = sitk.GetImageFromArray(array)
-        mask.CopyInformation(image)
-
-        _masked, note = elastix.apply_mask(image, mask, label=0)
-        assert note and "several labels" in note
-
-    def test_masking_keeps_only_the_masked_region(self):
-        image = _phantom(size=24)
-        array = np.zeros(sitk.GetArrayViewFromImage(image).shape, np.uint8)
-        array[6:14, 6:14, 6:14] = 1
-        mask = sitk.GetImageFromArray(array)
-        mask.CopyInformation(image)
-
-        masked, _note = elastix.apply_mask(image, mask, label=1)
-        kept = sitk.GetArrayViewFromImage(masked)
-        assert kept[6:14, 6:14, 6:14].any()
-        assert not kept[:6].any() and not kept[14:].any()
-
-    def test_the_masked_image_never_reaches_the_disk(self, tmp_path, monkeypatch):
-        """FIX: `MaskedImage` wrote `<temp>/fixed_image_masked.nii.gz` -- one
-        FIXED name shared by every patient of a run and by every concurrent
-        request being served.
-
-        Run from an empty directory rather than by patching a setting: the
-        masked image is held in memory now, so there is no temp directory to
-        point anywhere, and "wrote nothing at all" is the stronger claim.
-        """
-        monkeypatch.chdir(tmp_path)
-        fixed = _phantom(size=32)
-        moving, _truth = _moved(fixed)
-        masked, _note = elastix.apply_mask(fixed, _full_mask(fixed))
-        elastix.register(masked, moving)
-        assert list(tmp_path.iterdir()) == []
-
-
-# ---------------------------------------------------------------------------
-# The CBCT mode, end to end
-# ---------------------------------------------------------------------------
-
-class TestSemiAutomatedCBCT:
-    @staticmethod
-    def _cohort(tmp_path, subjects=("P1",)):
-        for subject in subjects:
-            fixed = _phantom(size=48, seed=abs(hash(subject)) % 100)
-            moving, _truth = _moved(fixed)
-            _write(fixed, str(tmp_path / "T1" / f"{subject}_T1_scan.nii.gz"))
-            _write(moving, str(tmp_path / "T2" / f"{subject}_T2_scan.nii.gz"))
-            _write(_full_mask(fixed), str(tmp_path / "masks" / f"{subject}_T1_CB_seg.nii.gz"))
-        return tmp_path
-
-    def test_a_run_writes_a_registered_scan_a_transform_and_a_report(self, tmp_path):
-        self._cohort(tmp_path)
-        run = dispatch.register(
-            t1_path=str(tmp_path / "T1"),
-            t2_path=str(tmp_path / "T2"),
-            t1_masks_path=str(tmp_path / "masks"),
-            modality=catalogs.MODALITY_CBCT,
-            automation=catalogs.AUTOMATION_SEMI,
-            regions=["Cranial base"],
-            output_dir=str(tmp_path / "out"),
-        )
-        assert run.succeeded == ["P1"]
-        produced = sorted(
-            os.path.relpath(os.path.join(directory, name), run.output_dir)
-            for directory, _, names in os.walk(run.output_dir)
-            for name in names
-        )
-        assert produced == [
-            "AREG_report.json",
-            os.path.join("CB", "P1_CB_Reg.nii.gz"),
-            os.path.join("CB", "P1_CB_Reg_transform.tfm"),
-        ]
-
-        with open(os.path.join(run.output_dir, "AREG_report.json")) as handle:
-            report = json.load(handle)
-        assert report["summary"] == {"patients": 1, "registered": 1, "failed": 0}
-        assert report["patients"]["P1"]["regions"]["CB"]["status"] == "ok"
-
-    def test_the_written_transform_moves_the_t2_onto_the_t1(self, tmp_path):
-        """The direction is asserted, not assumed: a transform written the
-        other way round still loads and still transforms, so nothing else in
-        the archive would show it.
-
-        It is also what the original could NOT give you: it registered against
-        a recentred copy of the T2 living in a `<t2>_Center` folder next to the
-        caller's own data, and wrote the transform between the T1 and THAT --
-        a volume the caller never received.
-        """
-        self._cohort(tmp_path)
-        run = dispatch.register(
-            t1_path=str(tmp_path / "T1"),
-            t2_path=str(tmp_path / "T2"),
-            t1_masks_path=str(tmp_path / "masks"),
-            modality=catalogs.MODALITY_CBCT,
-            automation=catalogs.AUTOMATION_SEMI,
-            regions=["Cranial base"],
-            output_dir=str(tmp_path / "out"),
-        )
-        transform = sitk.ReadTransform(
-            os.path.join(run.output_dir, "CB", "P1_CB_Reg_transform.tfm")
-        )
-        registered = sitk.ReadImage(os.path.join(run.output_dir, "CB", "P1_CB_Reg.nii.gz"))
-        moving = sitk.ReadImage(str(tmp_path / "T2" / "P1_T2_scan.nii.gz"))
-
-        # Resampling the ORIGINAL T2 with the written transform reproduces the
-        # registered volume the archive holds. It could only do that if the
-        # transform lives in the space of the file the caller sent.
-        resampler = sitk.ResampleImageFilter()
-        resampler.SetReferenceImage(moving)
-        resampler.SetTransform(transform)
-        resampler.SetInterpolator(sitk.sitkLinear)
-        reproduced = sitk.Cast(resampler.Execute(moving), sitk.sitkInt16)
-        assert np.array_equal(
-            sitk.GetArrayViewFromImage(reproduced), sitk.GetArrayViewFromImage(registered)
-        )
-
-    def test_a_subject_with_no_mask_is_reported_and_the_batch_goes_on(self, tmp_path):
-        self._cohort(tmp_path, subjects=("P1", "P2"))
-        os.remove(str(tmp_path / "masks" / "P2_T1_CB_seg.nii.gz"))
-
-        run = dispatch.register(
-            t1_path=str(tmp_path / "T1"),
-            t2_path=str(tmp_path / "T2"),
-            t1_masks_path=str(tmp_path / "masks"),
-            modality=catalogs.MODALITY_CBCT,
-            automation=catalogs.AUTOMATION_SEMI,
-            regions=["Cranial base"],
-            output_dir=str(tmp_path / "out"),
-        )
-        assert run.succeeded == ["P1"]
-        failure = run.patients["P2"]["regions"]["CB"]
-        assert failure["status"] == "failed"
-        assert "no Cranial base mask" in failure["reason"]
-
-    def test_no_pair_at_all_is_a_422_naming_the_pairing_rule(self, tmp_path):
-        image = _phantom(size=16)
-        _write(image, str(tmp_path / "T1" / "alpha_T1.nii.gz"))
-        _write(image, str(tmp_path / "T2" / "beta_T2.nii.gz"))
-        with pytest.raises(ToolInputError, match="paired by name"):
-            dispatch.register(
-                t1_path=str(tmp_path / "T1"),
-                t2_path=str(tmp_path / "T2"),
-                t1_masks_path=str(tmp_path / "T1"),
-                modality=catalogs.MODALITY_CBCT,
-                automation=catalogs.AUTOMATION_SEMI,
-                regions=["Cranial base"],
-                output_dir=str(tmp_path / "out"),
-            )
-
-
-# ---------------------------------------------------------------------------
-# Cross-argument rules -- every one of these is a 422 before a file is read
-# ---------------------------------------------------------------------------
-
-class TestArgumentRules:
-    def _main(self, tmp_path=None, **overrides):
-        """Drive `main()` WITH a supervisor unless a test says otherwise.
-
-        Every server run has one, and these tests are about the argument rules
-        rather than about reaching the other tools -- without a supervisor the
-        structural refusal fires first and hides the rule under test. The
-        absent-supervisor case is `TestTheToolsItDrives`.
-        """
-        arguments = {
-            "modality": catalogs.MODALITY_CBCT,
-            "automation": catalogs.AUTOMATION_SEMI,
-            "t1": "/nonexistent/t1",
-            "t2": "/nonexistent/t2",
-            "sup": FakeSup(tmp_path or "/tmp/areg-rules"),
-        }
-        arguments.update(overrides)
-        return dispatch.main(**arguments)
-
-    def test_a_mode_a_modality_does_not_have_is_refused(self):
-        with pytest.raises(ToolInputError, match="not a mode IOS has"):
-            self._main(
-                modality=catalogs.MODALITY_IOS, automation=catalogs.AUTOMATION_ORIENTED
-            )
-
-    def test_an_empty_region_selection_is_refused(self):
-        with pytest.raises(ToolInputError, match="at least one anatomical region"):
-            self._main(cbct_regions={name: False for name in catalogs.REGION_CHOICES})
-
-    def test_semi_automated_cbct_without_masks_is_refused(self):
-        with pytest.raises(ToolInputError, match="masks you provide"):
-            self._main()
-
-    def test_the_oriented_mode_without_a_reference_is_refused(self):
-        with pytest.raises(ToolInputError, match="orientation reference"):
-            self._main(automation=catalogs.AUTOMATION_ORIENTED)
-
-    def test_the_palate_patch_without_its_checkpoint_is_refused(self):
-        with pytest.raises(ToolInputError, match="patch-prediction checkpoint"):
-            self._main(modality=catalogs.MODALITY_IOS, automation=catalogs.AUTOMATION_SEMI)
-
-    def test_the_mucogingival_patch_predicts_its_own_landmarks(self):
-        """Sending nothing is the ORDINARY case: the landmarks are predicted by
-        the landmark tool. Reaching the file system is the pass condition --
-        the rules let the request through."""
-        with pytest.raises(Exception) as raised:
-            self._main(
-                modality=catalogs.MODALITY_IOS,
-                automation=catalogs.AUTOMATION_SEMI,
-                ios_patch=catalogs.PATCH_MGL,
-            )
-        assert not isinstance(raised.value, ToolInputError), str(raised.value)
-
-    def test_without_a_way_to_reach_the_landmark_tool_it_asks_for_the_landmarks(self):
-        """A deployment may legitimately not carry ALI, and must then say which
-        field to fill rather than fail from somewhere inside another tool."""
-        with pytest.raises(SupervisorRequired, match="mgl_landmarks"):
-            self._main(
-                sup=None,
-                modality=catalogs.MODALITY_IOS,
-                automation=catalogs.AUTOMATION_SEMI,
-                ios_patch=catalogs.PATCH_MGL,
-            )
-
-    def test_the_mucogingival_patch_runs_without_a_registration_model(self):
-        """Reaching the file system is the pass condition: the rules let it
-        through, which is what proves the palatal checkpoint is not required."""
-        with pytest.raises(Exception) as raised:
-            self._main(
-                modality=catalogs.MODALITY_IOS,
-                automation=catalogs.AUTOMATION_SEMI,
-                ios_patch=catalogs.PATCH_MGL,
-                mgl_landmarks="/nonexistent/landmarks",
-            )
-        assert "registration_model" not in str(raised.value)
-        assert "checkpoint" not in str(raised.value)
-
-    def test_a_negative_patch_height_is_refused(self):
-        with pytest.raises(ToolInputError, match="cannot be negative"):
-            self._main(
-                modality=catalogs.MODALITY_IOS,
-                automation=catalogs.AUTOMATION_SEMI,
-                ios_patch=catalogs.PATCH_MGL,
-                mgl_landmarks="/nonexistent/landmarks",
-                mgl_patch_height=-1.0,
-            )
-
-    def test_a_suffix_that_is_a_path_is_refused(self):
-        with pytest.raises(ToolInputError, match="name fragment"):
-            self._main(t1_masks="/nonexistent/masks", output_suffix="../escape")
-
-    def test_the_rules_run_before_anything_is_read(self):
-        """Every case above passes paths that do not exist. Reaching the file
-        system would raise something else entirely, which is the point: an
-        unusable request comes back in a second, not after an hour."""
-        assert not os.path.exists("/nonexistent/t1")
-
-
-class TestMaskLookup:
-    def test_a_mask_under_amasss_own_output_folder_still_finds_its_scan(self, tmp_path):
-        """AMASSS writes one `<scan>_<id>_SegOut/` directory per scan, so a mask
-        discovered under it keys to `P1_seg_SegOut/P1` while its scan keys to
-        `P1`. Without the leaf fallback every Fully-Automated run would report
-        'no mask for this subject' for every subject."""
-        from sadt_areg.cbct import pipeline as cbct_pipeline
-
-        image = _phantom(size=16)
-        _write(
-            image,
-            str(tmp_path / "P1_T1_scan_seg_SegOut" / "P1_T1_scan_seg_MANDMASK.nii.gz"),
-        )
-        found = cbct_pipeline.find_masks([str(tmp_path)], "MAND", scan_keys=["P1"])
-        assert os.path.basename(found["P1"]) == "P1_T1_scan_seg_MANDMASK.nii.gz"
-
-    def test_an_ambiguous_leaf_is_not_guessed(self, tmp_path):
-        """Two subjects genuinely called P1 in different folders must not
-        borrow each other's mask."""
-        from sadt_areg.cbct import pipeline as cbct_pipeline
-
-        image = _phantom(size=16)
-        for site in ("siteA", "siteB"):
-            _write(image, str(tmp_path / site / "P1_T1_MAND_seg.nii.gz"))
-        found = cbct_pipeline.find_masks([str(tmp_path)], "MAND", scan_keys=["P1"])
-        assert "P1" not in found
-
-
-class TestCheckpointLookup:
-    def test_the_checkpoint_is_found_inside_the_bundle_folder(self, tmp_path):
-        """A `server_selectable` name resolves to the hosted ENTRY, and the
-        published AREG bundle is a folder -- so what reaches the predictor is a
-        directory, not the .ckpt the network loads."""
-        from sadt_areg.ios import butterfly
-
-        bundle = tmp_path / "AREG_model"
-        (bundle / "nested").mkdir(parents=True)
-        (bundle / "nested" / "patch.ckpt").write_text("x")
-        assert butterfly.find_checkpoint(str(bundle)).endswith("patch.ckpt")
-
-    def test_a_bundle_with_no_checkpoint_names_the_setup_script(self, tmp_path):
-        from sadt_areg.ios import butterfly
-
-        (tmp_path / "empty").mkdir()
-        with pytest.raises(ToolInputError, match="setup-models.sh"):
-            butterfly.find_checkpoint(str(tmp_path / "empty"))
-
-    def test_several_checkpoints_are_a_422_naming_them(self, tmp_path):
-        """Which weights registered a patient must never be a surprise."""
-        from sadt_areg.ios import butterfly
-
-        bundle = tmp_path / "two"
-        bundle.mkdir()
-        (bundle / "a.ckpt").write_text("x")
-        (bundle / "b.ckpt").write_text("x")
-        with pytest.raises(ToolInputError, match="a.ckpt, b.ckpt"):
-            butterfly.find_checkpoint(str(bundle))
-
-
-class TestTheToolsItDrives:
-    """The seam is a contract, and a rename on the other side of one is exactly
-    the kind of drift nothing else would catch."""
-
-    def test_a_mode_needing_a_tool_says_so_when_there_is_no_supervisor(self):
-        """Nothing about the request is wrong -- there is simply no way to reach
-        the other tool. So the message names the mode that DOES work rather than
-        an argument to change, because "deploy a tool" is not something the
-        person who sent the request can act on."""
-        with pytest.raises(SupervisorRequired) as raised:
-            tools.require(None, "AMASSS", "Fully-Automated CBCT registration")
-
-        message = str(raised.value)
-        assert "Fully-Automated CBCT registration" in message
-        assert "AMASSS" in message
-        assert "Semi-Automated" in message   # the mode that does work
-        assert "t1_masks" in message         # and the argument that carries it
-
-    def test_a_supervisor_makes_the_same_mode_acceptable(self):
-        assert tools.require(FakeSup("/tmp"), "AMASSS", "anything") is None
-
-    def test_the_mask_request_names_amasss_arguments(self, tmp_path):
-        """AREG sends structure CODES. The packaged AMASSS publishes codes as its
-        `choices`, so the display-name translation the in-process version needed
-        is gone rather than restated -- and this is what says so."""
-        planted = tmp_path / "masks"
-        planted.mkdir()
-        sup = FakeSup(tmp_path, {"AMASSS": lambda params: planted})
-
-        tools.segment_masks(sup, str(tmp_path / "t1"), "/models/AMASSS", ["CBMASK"])
-
-        tool, params = sup.calls[0]
-        assert tool == "AMASSS"
-        assert params["structures"] == ["CBMASK"]
-        # One binary file per structure: `find_masks` looks each region up by
-        # name, and a merged multi-label volume makes every region resolve to
-        # the same file.
-        assert params["merge"] == ["SEPARATE"]
-        assert params["generate_surface"] is False
-        assert set(params) >= {"scans", "model", "output_dir"}
-
-    def test_the_landmark_request_asks_for_mucogingival_alone(self, tmp_path):
-        """Alone, because it is the one network ALI leaves off by default and
-        the crown networks would each cost another pass over every mesh."""
-        planted = tmp_path / "mg"
-        planted.mkdir()
-        sup = FakeSup(tmp_path, {"ALI": lambda params: planted})
-
-        tools.predict_mucogingival(sup, str(tmp_path / "meshes"))
-
-        tool, params = sup.calls[0]
-        assert tool == "ALI"
-        assert params["ios_networks"] == ["Mucogingival"]
-        assert params["prediction_ID"] == "MG_Pred"
-        # Not named, so ALI picks the bundle matching the input itself.
-        assert "model" not in params
-
-    def test_the_orientation_request_is_the_nested_one(self, tmp_path):
-        """ASO is itself supervised for CBCT, so this is AREG -> ASO -> ALI:
-        three tools and three venvs deep. Whatever supplies `sup` supplies the
-        callee's too; nothing here arranges that."""
-        planted = tmp_path / "oriented"
-        planted.mkdir()
-        sup = FakeSup(tmp_path, {"ASO": lambda params: planted})
-
-        tools.orient_scans(sup, str(tmp_path / "scans"), "/models/gold", "CBCT")
-
-        tool, params = sup.calls[0]
-        assert tool == "ASO"
-        assert params["automation"] == "Fully-Automated"
-        assert params["modality"] == "CBCT"
-        assert params["output_suffix"] == "Or"
-
-    def test_every_tool_is_named_by_string(self):
-        """`sup.run("ASO", ...)`, never `sup.ASO(...)`. A typo in a string is
-        greppable and tools.py is the whole call graph; a typo in an attribute
-        is an AttributeError an hour into a job."""
-        source = open(tools.__file__, encoding="utf-8").read()
-        assert 'sup.run("' in source
-        for tool in ("AMASSS", "ASO", "Crown_Seg", "ALI"):
-            assert f'"{tool}"' in source, tool
-
-    @pytest.mark.skipif(
-        not all(__import__("sadt_testkit").is_built(t)
-                for t in ("AMASSS", "ASO", "Crown_Seg", "ALI")),
-        reason="run `uv sync` in the four tools AREG drives",
-    )
-    def test_the_arguments_it_sends_are_the_arguments_they_publish(self):
-        """Against the REAL schemas, out of process. This is the test that
-        catches a sibling renaming an argument -- the failure would otherwise
-        land an hour into a chain, inside another tool."""
-        from sadt_testkit import tool_schema
-
-        assert set(tool_schema("AMASSS")["arguments"]) >= {
-            "scans", "model", "output_dir", "structures", "merge",
-            "prediction_ID", "generate_surface",
-        }
-        assert set(tool_schema("ASO")["arguments"]) >= {
-            "input", "reference", "output_dir", "modality", "automation",
-            "output_suffix",
-        }
-        assert set(tool_schema("Crown_Seg")["arguments"]) >= {
-            "meshes", "output_dir", "suffix", "model",
-        }
-        ali = tool_schema("ALI")
-        assert set(ali["arguments"]) >= {
-            "input", "model", "output_dir", "ios_networks", "prediction_ID",
-        }
-        # And the network AREG asks for by name is one ALI actually offers.
-        assert "Mucogingival" in ali["arguments"]["ios_networks"]["choices"]
-
-
-# ---------------------------------------------------------------------------
-# The IOS engine, everything except the network
-# ---------------------------------------------------------------------------
-
-vtk = pytest.importorskip("vtk", reason="the IOS engine needs VTK")
-
-from sadt_areg import landmarks as landmark_files  # noqa: E402
-from sadt_areg.ios import butterfly as butterfly_module  # noqa: E402
-from sadt_areg.ios import icp, mgl, orientation, postprocess, surfaces  # noqa: E402
-from sadt_areg.ios import pipeline as ios_pipeline  # noqa: E402
-
-
 def _grid_mesh(rows=12, columns=12, spacing=1.0):
     """A flat triangulated grid, the smallest thing with a real adjacency."""
     points = vtk.vtkPoints()
@@ -732,6 +125,37 @@ def _grid_mesh(rows=12, columns=12, spacing=1.0):
     mesh.SetPoints(points)
     mesh.SetPolys(triangles)
     return mesh
+
+
+class TestCheckpointLookup:
+    def test_the_checkpoint_is_found_inside_the_bundle_folder(self, tmp_path):
+        """A `server_selectable` name resolves to the hosted ENTRY, and the
+        published AREG bundle is a folder -- so what reaches the predictor is a
+        directory, not the .ckpt the network loads."""
+        from sadt_areg_ios import butterfly
+
+        bundle = tmp_path / "AREG_model"
+        (bundle / "nested").mkdir(parents=True)
+        (bundle / "nested" / "patch.ckpt").write_text("x")
+        assert butterfly.find_checkpoint(str(bundle)).endswith("patch.ckpt")
+
+    def test_a_bundle_with_no_checkpoint_names_the_setup_script(self, tmp_path):
+        from sadt_areg_ios import butterfly
+
+        (tmp_path / "empty").mkdir()
+        with pytest.raises(ToolInputError, match="setup-models.sh"):
+            butterfly.find_checkpoint(str(tmp_path / "empty"))
+
+    def test_several_checkpoints_are_a_422_naming_them(self, tmp_path):
+        """Which weights registered a patient must never be a surprise."""
+        from sadt_areg_ios import butterfly
+
+        bundle = tmp_path / "two"
+        bundle.mkdir()
+        (bundle / "a.ckpt").write_text("x")
+        (bundle / "b.ckpt").write_text("x")
+        with pytest.raises(ToolInputError, match="a.ckpt, b.ckpt"):
+            butterfly.find_checkpoint(str(bundle))
 
 
 class TestJaws:
@@ -1216,7 +640,7 @@ class TestIOSTransform:
 
 class TestPatchCloud:
     def test_a_patch_selecting_nothing_says_so(self):
-        from sadt_areg.ios import butterfly
+        from sadt_areg_ios import butterfly
         from vtk.util.numpy_support import numpy_to_vtk
 
         mesh = _grid_mesh()
@@ -1229,7 +653,7 @@ class TestPatchCloud:
             butterfly.patch_cloud(mesh)
 
     def test_the_cloud_holds_exactly_the_patch_points(self):
-        from sadt_areg.ios import butterfly
+        from sadt_areg_ios import butterfly
         from vtk.util.numpy_support import numpy_to_vtk
 
         mesh = _grid_mesh()
@@ -1320,3 +744,89 @@ class TestIOSRun:
         assert entry["jaws"] == ["Lower"]
         assert len(entry["outputs"]) == 3  # two meshes plus the transform
         assert all("Upper" not in name for name in entry["outputs"])
+
+
+# Moved from AREG_IOSCBCT's suite: this package is the one that makes
+# the call, so this is where a change to it should fail.
+def test_the_landmark_request_asks_for_mucogingival_alone(tmp_path):
+    """Alone, because it is the one network ALI leaves off by default and
+    the crown networks would each cost another pass over every mesh."""
+    planted = tmp_path / "mg"
+    planted.mkdir()
+    sup = FakeSup(tmp_path, {"ALI_IOS": lambda params: planted})
+
+    tools.predict_mucogingival(sup, str(tmp_path / "meshes"))
+
+    tool, params = sup.calls[0]
+    assert tool == "ALI_IOS"
+    assert params["networks"] == ["Mucogingival"]
+    assert params["prediction_ID"] == "MG_Pred"
+    # Not named, so ALI picks the bundle matching the input itself.
+    assert "model" not in params
+
+
+# Moved from the single AREG suite when AREG became three tools. These drive
+# `main()` with t1/t2, which is this tool's signature, not the orchestrator's;
+# they were sitting in AREG_IOSCBCT's file only because the three used to share
+# one. The three that crossed `modality` with `automation` are not ported: the
+# split replaced that argument with the choice of which tool you call.
+
+class TestArgumentRules:
+    def _main(self, tmp_path=None, **overrides):
+            """Drive `main()` WITH a supervisor unless a test says otherwise.
+
+            Every server run has one, and these tests are about the argument rules
+            rather than about reaching the other tools -- without a supervisor the
+            structural refusal fires first and hides the rule under test. The
+            absent-supervisor case is `TestTheToolsItDrives`.
+            """
+            arguments = {
+                "automation": catalogs.AUTOMATION_SEMI,
+                "t1": "/nonexistent/t1",
+                "t2": "/nonexistent/t2",
+                "sup": FakeSup(tmp_path or "/tmp/areg-rules"),
+            }
+            arguments.update(overrides)
+            return dispatch.main(**arguments)
+
+    def test_the_mucogingival_patch_predicts_its_own_landmarks(self):
+            """Sending nothing is the ORDINARY case: the landmarks are predicted by
+            the landmark tool. Reaching the file system is the pass condition --
+            the rules let the request through."""
+            with pytest.raises(Exception) as raised:
+                self._main(
+                    automation=catalogs.AUTOMATION_SEMI,
+                    ios_patch=catalogs.PATCH_MGL,
+                )
+            assert not isinstance(raised.value, ToolInputError), str(raised.value)
+
+    def test_without_a_way_to_reach_the_landmark_tool_it_asks_for_the_landmarks(self):
+            """A deployment may legitimately not carry ALI, and must then say which
+            field to fill rather than fail from somewhere inside another tool."""
+            with pytest.raises(SupervisorRequired, match="mgl_landmarks"):
+                self._main(
+                    sup=None,
+                    automation=catalogs.AUTOMATION_SEMI,
+                    ios_patch=catalogs.PATCH_MGL,
+                )
+
+    def test_the_mucogingival_patch_runs_without_a_registration_model(self):
+            """Reaching the file system is the pass condition: the rules let it
+            through, which is what proves the palatal checkpoint is not required."""
+            with pytest.raises(Exception) as raised:
+                self._main(
+                    automation=catalogs.AUTOMATION_SEMI,
+                    ios_patch=catalogs.PATCH_MGL,
+                    mgl_landmarks="/nonexistent/landmarks",
+                )
+            assert "registration_model" not in str(raised.value)
+            assert "checkpoint" not in str(raised.value)
+
+    def test_a_negative_patch_height_is_refused(self):
+            with pytest.raises(ToolInputError, match="cannot be negative"):
+                self._main(
+                    automation=catalogs.AUTOMATION_SEMI,
+                    ios_patch=catalogs.PATCH_MGL,
+                    mgl_landmarks="/nonexistent/landmarks",
+                    mgl_patch_height=-1.0,
+                )
