@@ -84,15 +84,14 @@ LAYOUT = {
     "reference": {"label": "Register onto", "section": INPUT},
     "mode": {"label": "What to do", "section": INPUT},
     "patch": {"label": "Register on", "section": INPUT},
-    # Labelled "Teeth", as upstream did: the section and the row it sits in say
-    # which corner, so repeating it in the label is noise on four rows.
-    "tooth_anterior_right": {"label": "Teeth", "section": PATCH, "cell": "ar",
-                             "visible_when": BUTTERFLY_ONLY},
-    "tooth_anterior_left": {"label": "Teeth", "section": PATCH, "cell": "al",
-                             "visible_when": BUTTERFLY_ONLY},
-    "tooth_posterior_right": {"label": "Teeth", "section": PATCH, "cell": "pr",
-                             "visible_when": BUTTERFLY_ONLY},
-    "tooth_posterior_left": {"label": "Teeth", "section": PATCH, "cell": "pl",
-                             "visible_when": BUTTERFLY_ONLY},
+    # Not rendered. The four teeth bound the patch and every arch uses the same
+    # ones, so a clinician never changes them: shown, they are four fields of
+    # noise beside the four pads that are actually driven. The tool still
+    # declares them and still applies its defaults, and a caller can still send
+    # them.
+    "tooth_anterior_right": {"hidden": True},
+    "tooth_anterior_left": {"hidden": True},
+    "tooth_posterior_right": {"hidden": True},
+    "tooth_posterior_left": {"hidden": True},
     "output_suffix": {"label": "Suffix", "section": OUTPUT},
 }
