@@ -30,7 +30,13 @@ SHIFT_RANGE = 15.0
 # The horizontal axis of a corner pad. 0 is mid-arch, 1 lands on the tooth
 # itself at the outer edge, which is why both ends are named rather than left as
 # bare numbers: "0.8" says nothing about where that is in a mouth.
+# Shown only while the palate patch is the one being built. The mucogingival
+# line is read off the mesh, not shaped from four teeth, so every control below
+# is inert in that mode -- upstream hid them for the same reason.
+BUTTERFLY_ONLY = {"patch": "Palate (butterfly)"}
+
 _RATIO = {
+    "visible_when": BUTTERFLY_ONLY,
     "x_range": [0.0, 1.0],
     "x_labels": ["mid", "out"],
     "y_range": [-ADJUST_RANGE, ADJUST_RANGE],
@@ -59,6 +65,7 @@ LAYOUT = {
         "y_range": [-SHIFT_RANGE, SHIFT_RANGE],
         "y_labels": ["POST", "ANT"],
         "section": PATCH,
+        "visible_when": BUTTERFLY_ONLY,
     },
     "surfaces": {"label": "Arches", "section": INPUT},
     "reference": {"label": "Register onto", "section": INPUT},
@@ -66,9 +73,13 @@ LAYOUT = {
     "patch": {"label": "Register on", "section": INPUT},
     # Labelled "Teeth", as upstream did: the section and the row it sits in say
     # which corner, so repeating it in the label is noise on four rows.
-    "tooth_anterior_right": {"label": "Teeth", "section": PATCH},
-    "tooth_anterior_left": {"label": "Teeth", "section": PATCH},
-    "tooth_posterior_right": {"label": "Teeth", "section": PATCH},
-    "tooth_posterior_left": {"label": "Teeth", "section": PATCH},
+    "tooth_anterior_right": {"label": "Teeth", "section": PATCH,
+                             "visible_when": BUTTERFLY_ONLY},
+    "tooth_anterior_left": {"label": "Teeth", "section": PATCH,
+                             "visible_when": BUTTERFLY_ONLY},
+    "tooth_posterior_right": {"label": "Teeth", "section": PATCH,
+                             "visible_when": BUTTERFLY_ONLY},
+    "tooth_posterior_left": {"label": "Teeth", "section": PATCH,
+                             "visible_when": BUTTERFLY_ONLY},
     "output_suffix": {"label": "Suffix", "section": OUTPUT},
 }
