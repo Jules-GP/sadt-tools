@@ -106,7 +106,9 @@ LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label
                # How many columns this argument's SECTION is laid out in.
                # Declared per argument because that is where a layout hangs its
                # hints; the client reads it back per section.
-               "section_columns")
+               "section_columns",
+               # Arguments naming one cell are drawn together in it.
+               "cell")
 
 LAYOUT_MODULE = "layout"
 

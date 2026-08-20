@@ -51,17 +51,18 @@ _RATIO = {
 }
 
 
-def _corner(label):
+def _corner(label, cell):
     hints = dict(_RATIO)
     hints["label"] = label
+    hints["cell"] = cell
     return hints
 
 
 LAYOUT = {
-    "anterior_right": _corner("Anterior right"),
-    "anterior_left": _corner("Anterior left"),
-    "posterior_right": _corner("Posterior right"),
-    "posterior_left": _corner("Posterior left"),
+    "anterior_right": _corner("Anterior right", "ar"),
+    "anterior_left": _corner("Anterior left", "al"),
+    "posterior_right": _corner("Posterior right", "pr"),
+    "posterior_left": _corner("Posterior left", "pl"),
     "shift": {
         "ui": "joystick",
         "label": "Move the whole patch",
@@ -78,13 +79,13 @@ LAYOUT = {
     "patch": {"label": "Register on", "section": INPUT},
     # Labelled "Teeth", as upstream did: the section and the row it sits in say
     # which corner, so repeating it in the label is noise on four rows.
-    "tooth_anterior_right": {"label": "Teeth", "section": PATCH,
+    "tooth_anterior_right": {"label": "Teeth", "section": PATCH, "cell": "ar",
                              "visible_when": BUTTERFLY_ONLY},
-    "tooth_anterior_left": {"label": "Teeth", "section": PATCH,
+    "tooth_anterior_left": {"label": "Teeth", "section": PATCH, "cell": "al",
                              "visible_when": BUTTERFLY_ONLY},
-    "tooth_posterior_right": {"label": "Teeth", "section": PATCH,
+    "tooth_posterior_right": {"label": "Teeth", "section": PATCH, "cell": "pr",
                              "visible_when": BUTTERFLY_ONLY},
-    "tooth_posterior_left": {"label": "Teeth", "section": PATCH,
+    "tooth_posterior_left": {"label": "Teeth", "section": PATCH, "cell": "pl",
                              "visible_when": BUTTERFLY_ONLY},
     "output_suffix": {"label": "Suffix", "section": OUTPUT},
 }
