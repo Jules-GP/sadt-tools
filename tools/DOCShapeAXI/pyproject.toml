@@ -1,0 +1,86 @@
+[project]
+name = "sadt-docshapeaxi"
+version = "0.1.0"
+description = "Grade a surface mesh with a shapeaxi classifier, and show what the model looked at."
+# The deployment image's interpreter (lab-ai:2026.08, python 3.11.13), and the
+# only one pytorch3d is built for there.
+requires-python = ">=3.11,<3.12"
+# Everything the tool needs EXCEPT the shapeaxi engine, kept apart for the same
+# reason Crown_Seg keeps it apart: a plain `uv sync` must be able to import the
+# package and publish its schema without pulling a CUDA stack.
+dependencies = [
+    # 2.11 rather than the 2.8.0 the imaging tools pin, and deliberately: this
+    # tool shares Crown_Seg's engine, and the pytorch3d wheel tag
+    # (`+pt2110cu128`) names one torch version exactly. Aligning the two would
+    # mean revalidating BOTH tools' outputs, so they stay together on 2.11 and
+    # the deployment carries two torch runtimes rather than three.
+    "torch==2.11.0",
+    "pandas==2.3.3",
+    # 2.2.6 rather than the 2.3.2 its siblings pin: opencv-python-headless
+    # 4.12 caps numpy below 2.3, and OpenCV is here for one `cv2.resize` in the
+    # GradCAM path. Moving to OpenCV 5 to lift the cap would be a larger change
+    # than staying one numpy minor behind, and nothing crosses between tools --
+    # each has its own virtualenv, which is what makes a per-tool pin cheap.
+    "numpy==2.2.6",
+    "vtk==9.6.2",
+]
+
+# What makes this directory a tool.
+[tool.sadt]
+tool = true
+name = "DOCShapeAXI"
+
+[project.optional-dependencies]
+grading = [
+    "shapeaxi>=2.0.2",
+    "pytorch3d==0.7.9+pt2110cu128",
+    # Transitive through shapeaxi, listed here because a `tool.uv.sources`
+    # entry only applies to a DECLARED dependency: left transitive, torchvision
+    # comes from PyPI built against a different torch and importing it raises
+    # `RuntimeError: operator torchvision::nms does not exist`. Crown_Seg
+    # measured that; it is not anticipated here.
+    "torchvision==0.26.0",
+    # The explainability half. GradCAM is captum's, the resize is OpenCV's, and
+    # both are imported at module level by the upstream CLI. 0.9.0 rather than
+    # 0.8.0, which caps numpy below 2.0 and cannot coexist with the numpy every
+    # other tool here pins. Upstream never meets that: its shared conda env
+    # leaves numpy to whatever pip last resolved.
+    "captum==0.9.0",
+    "opencv-python-headless==4.12.0.88",
+    "tqdm==4.67.1",
+]
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_docshapeaxi"]
+
+# `explicit` is load-bearing: without it uv looks for EVERY package on these
+# indexes, and most packages are on neither.
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch3d-wheels"
+url = "https://ImageMindAnalytics.github.io/pytorch3d-wheels/simple/"
+explicit = true
+
+[tool.uv.sources]
+sadt-testkit = { path = "../../testkit", editable = true }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+pytorch3d = { index = "pytorch3d-wheels" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+    "models: needs the real checkpoint bundle and is skipped without it. See tests/data/README.md.",
+]
