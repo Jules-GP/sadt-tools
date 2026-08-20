@@ -102,7 +102,11 @@ LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label
                # Names for the two ends of each axis. Presentation, unlike the
                # ranges: "0.8" says nothing about where that is in a mouth, and
                # "mid"/"out" does.
-               "x_labels", "y_labels")
+               "x_labels", "y_labels",
+               # How many columns this argument's SECTION is laid out in.
+               # Declared per argument because that is where a layout hangs its
+               # hints; the client reads it back per section.
+               "section_columns")
 
 LAYOUT_MODULE = "layout"
 

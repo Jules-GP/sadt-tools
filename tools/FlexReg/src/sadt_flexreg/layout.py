@@ -36,6 +36,11 @@ SHIFT_RANGE = 15.0
 BUTTERFLY_ONLY = {"patch": "Palate (butterfly)"}
 
 _RATIO = {
+    # Two columns, so the four corners read as the 2x2 they are: left column one
+    # side of the arch, right column the other, top row anterior. Where a pad
+    # sits on screen is then where that corner sits in the mouth, which is what
+    # upstream's grid did and what a column of four identical pads loses.
+    "section_columns": 2,
     "visible_when": BUTTERFLY_ONLY,
     "x_range": [0.0, 1.0],
     "x_labels": ["mid", "out"],
