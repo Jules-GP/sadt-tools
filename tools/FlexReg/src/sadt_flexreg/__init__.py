@@ -51,20 +51,25 @@ def run(
     mode: Literal["Patch", "Register", "Patch and register"] = "Patch and register",
     patch: Literal["Palate (butterfly)", "Mucogingival line"] = "Palate (butterfly)",
     reference: Path = "",
-    # Universal tooth numbers bounding the patch. The defaults are upstream's
-    # form defaults, which are the first molars and canines of an upper arch.
-    tooth_anterior_right: int = 6,
-    tooth_anterior_left: int = 11,
-    tooth_posterior_right: int = 3,
-    tooth_posterior_left: int = 14,
-    # Each corner is ONE position, not two settings: how far along its tooth the
+    # ONE ROW PER CORNER, in the order a panel renders them: the tooth the
+    # corner is placed along, then the position along it. Upstream put the two
+    # side by side for the same reason -- a tooth number read three sections
+    # away from the pad it drives says nothing about which corner it moves.
+    #
+    # Each position is ONE thing, not two settings: how far along its tooth the
     # boundary sits (0 at mid-arch, 1 on the tooth) and how far it moves fore or
     # aft in millimetres. Declared as a pair so the panel gives it a 2D pad whose
-    # knob sits where the point sits on the arch; two number fields state two
-    # numbers and cannot state that. See layout.py for the axes.
+    # knob sits where the point sits on the arch. See layout.py for the axes.
+    #
+    # The tooth defaults are upstream's form defaults: the first molars and
+    # canines of an upper arch.
+    tooth_anterior_right: int = 6,
     anterior_right: tuple[float, float] = (0.5, 0.0),
+    tooth_anterior_left: int = 11,
     anterior_left: tuple[float, float] = (0.5, 0.0),
+    tooth_posterior_right: int = 3,
     posterior_right: tuple[float, float] = (0.5, 0.0),
+    tooth_posterior_left: int = 14,
     posterior_left: tuple[float, float] = (0.5, 0.0),
     # The whole patch, moved rigidly: left-right and antero-posterior, in mm.
     shift: tuple[float, float] = (0.0, 0.0),
@@ -83,14 +88,14 @@ def run(
         reference: The surface the others are registered onto. Required to
             register, unused when only building a patch.
         tooth_anterior_right: Universal number of the anterior right tooth.
+        anterior_right: Where that corner sits: ratio along the tooth (0 at
+            mid-arch, 1 on the tooth) and millimetres fore or aft.
         tooth_anterior_left: Universal number of the anterior left tooth.
+        anterior_left: Where that corner sits.
         tooth_posterior_right: Universal number of the posterior right tooth.
+        posterior_right: Where that corner sits.
         tooth_posterior_left: Universal number of the posterior left tooth.
-        anterior_right: Where the anterior right corner sits: ratio along its
-            tooth (0 at mid-arch, 1 on the tooth) and millimetres fore or aft.
-        anterior_left: The same, for the anterior left corner.
-        posterior_right: The same, for the posterior right corner.
-        posterior_left: The same, for the posterior left corner.
+        posterior_left: Where that corner sits.
         shift: Millimetres the whole patch moves, left-right then fore-aft.
         output_suffix: Appended to each written file's name.
 

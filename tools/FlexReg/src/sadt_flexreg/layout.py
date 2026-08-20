@@ -9,6 +9,16 @@ The ranges are NOT presentation. The server validates against them, so a request
 that skips the panel cannot place a corner off the arch and be told it worked.
 """
 
+# The three groups the original panel had, in its order: what goes in, the patch
+# you shape, then what comes out. The tooth that bounds a corner sits WITH that
+# corner rather than in a section of its own -- upstream put them side by side,
+# and a tooth number read three sections away from the pad it drives says
+# nothing about which corner it moves.
+INPUT = "Inputs"
+PATCH = "Patch"
+OUTPUT = "Outputs"
+
+
 # Travel of the antero-posterior axis, in millimetres. Upstream's ADJUST_RANGE:
 # the knob saturates there, and a larger number typed into the box still works.
 ADJUST_RANGE = 5.0
@@ -26,7 +36,7 @@ _RATIO = {
     "y_range": [-ADJUST_RANGE, ADJUST_RANGE],
     "y_labels": ["POST", "ANT"],
     "ui": "joystick",
-    "section": "Patch corners",
+    "section": PATCH,
 }
 
 
@@ -48,15 +58,17 @@ LAYOUT = {
         "x_labels": ["L", "R"],
         "y_range": [-SHIFT_RANGE, SHIFT_RANGE],
         "y_labels": ["POST", "ANT"],
-        "section": "Patch corners",
+        "section": PATCH,
     },
-    "mode": {"label": "What to do", "section": "Registration"},
-    "patch": {"label": "Register on", "section": "Registration"},
-    "reference": {"label": "Reference surface", "section": "Registration"},
-    "surfaces": {"label": "Surfaces", "section": "Input"},
-    "tooth_anterior_right": {"label": "Anterior right tooth", "section": "Patch teeth"},
-    "tooth_anterior_left": {"label": "Anterior left tooth", "section": "Patch teeth"},
-    "tooth_posterior_right": {"label": "Posterior right tooth", "section": "Patch teeth"},
-    "tooth_posterior_left": {"label": "Posterior left tooth", "section": "Patch teeth"},
-    "output_suffix": {"label": "Output suffix", "section": "Registration"},
+    "surfaces": {"label": "Arches", "section": INPUT},
+    "reference": {"label": "Register onto", "section": INPUT},
+    "mode": {"label": "What to do", "section": INPUT},
+    "patch": {"label": "Register on", "section": INPUT},
+    # Labelled "Teeth", as upstream did: the section and the row it sits in say
+    # which corner, so repeating it in the label is noise on four rows.
+    "tooth_anterior_right": {"label": "Teeth", "section": PATCH},
+    "tooth_anterior_left": {"label": "Teeth", "section": PATCH},
+    "tooth_posterior_right": {"label": "Teeth", "section": PATCH},
+    "tooth_posterior_left": {"label": "Teeth", "section": PATCH},
+    "output_suffix": {"label": "Suffix", "section": OUTPUT},
 }
