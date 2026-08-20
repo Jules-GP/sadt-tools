@@ -308,3 +308,18 @@ def test_the_two_spellings_of_the_landmark_tool_agree():
 
     source = _Path(pipeline.__file__).read_text(encoding="utf-8")
     assert '"{}"'.format(tools.LANDMARK_TOOL) in source
+
+
+def test_one_pair_takes_a_mask_as_a_file(pair, tmp_path):
+    """The picker offers file-or-folder for every path, so a file must work."""
+    t1, t2 = pair
+    mask = np.zeros((64, 64, 64), dtype=np.float32)
+    mask[18:46, 18:46, 18:46] = 1.0
+    mask_path = tmp_path / "MG01_mask.nii.gz"
+    nib.save(nib.Nifti1Image(mask, np.diag([SPACING] * 3 + [1.0])), str(mask_path))
+
+    out = run(t1=t1 / "MG01_T1.nii.gz", t2=t2 / "MG01_T2.nii.gz",
+              output_dir=tmp_path / "out", masks=mask_path)
+
+    assert json.loads((out / "GreedyReg_report.json").read_text())["cases"][0]["mask"] \
+        == str(mask_path)
