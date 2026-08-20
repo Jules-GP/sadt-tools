@@ -1,0 +1,59 @@
+[project]
+name = "sadt-greedyreg"
+version = "0.1.0"
+description = "Register a follow-up CBCT onto its baseline with Greedy affine registration."
+# 3.11 is the deployment image's interpreter (lab-ai:2026.08, python 3.11.13),
+# which is the only interpreter picsl-greedy has been exercised on here.
+requires-python = ">=3.11,<3.12"
+# No torch, and that is the whole point of the migration. Upstream's module
+# installs monai, pydicom 2.2.2 and dicom2nifti 2.3.0 into Slicer's shared
+# site-packages purely so that ALI_CBCT can run IN-PROCESS for the landmark
+# mode. Here ALI_CBCT is reached through the supervisor, in its own virtualenv,
+# so none of that stack is this tool's business and none of it is installed.
+dependencies = [
+    # Greedy itself, as a wheel. Upstream downloads an ITK-SNAP 4.2.2 tarball
+    # (or, on Windows, silently runs its NSIS installer) at first use and
+    # invokes bin/greedy as a subprocess. picsl-greedy is the same code from
+    # the same lab, published by PICSL, and it removes a network fetch, an
+    # unpinned binary version and a platform-specific installer dance. See
+    # README for what that changes and what it does not.
+    "picsl-greedy==1.4.0",
+    # Reads and writes the NIfTI volumes, and is what bakes a landmark-derived
+    # rigid transform into a moving image's affine. Upstream pip-installs it
+    # into Slicer on demand and its own CLI exits 1 when it is missing.
+    "nibabel==5.4.2",
+    "numpy==2.3.2",
+]
+
+# What makes this directory a tool. A directory holding a pyproject.toml
+# WITHOUT this section -- the testkit -- is a plain package: importable,
+# installable, never discovered or served.
+[tool.sadt]
+tool = true
+# The API identity: what a client sends, what deployment.toml is keyed by, and
+# what another tool would pass to `sup.run()`.
+name = "GreedyReg"
+
+[dependency-groups]
+dev = ["pytest==8.3.4", "sadt-testkit"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sadt_greedyreg"]
+
+[tool.uv.sources]
+# Development only: lets this tool's tests run ANOTHER tool through that tool's
+# own venv, as a subprocess, the way the server does. It has no dependencies of
+# its own, so it cannot perturb the resolution above. Never move it into
+# [project] dependencies -- see testkit/README.md.
+sadt-testkit = { path = "../../testkit", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA device. Skipped in CI (`-m 'not gpu'`); run it by hand and report the result in the PR.",
+    "models: needs the real ALI model bundle and is skipped without it. See tests/data/README.md.",
+]
