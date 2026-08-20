@@ -108,7 +108,9 @@ LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label
                # hints; the client reads it back per section.
                "section_columns",
                # Arguments naming one cell are drawn together in it.
-               "cell")
+               "cell",
+               # What each of a vec2's two numbers is, written beside its box.
+               "x_label", "y_label")
 
 LAYOUT_MODULE = "layout"
 

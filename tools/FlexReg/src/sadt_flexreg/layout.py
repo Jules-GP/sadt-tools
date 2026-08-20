@@ -42,6 +42,11 @@ _RATIO = {
     # upstream's grid did and what a column of four identical pads loses.
     "section_columns": 2,
     "visible_when": BUTTERFLY_ONLY,
+    # Named as the original named them: what the number MEASURES, not which axis
+    # it happens to be. "Ratio (R-L)" tells a clinician what 0.345 means; "X"
+    # does not.
+    "x_label": "Ratio (R-L)",
+    "y_label": "Adjust (A-P)",
     "x_range": [0.0, 1.0],
     "x_labels": ["mid", "out"],
     "y_range": [-ADJUST_RANGE, ADJUST_RANGE],
@@ -72,6 +77,8 @@ LAYOUT = {
         "y_labels": ["POST", "ANT"],
         "section": PATCH,
         "visible_when": BUTTERFLY_ONLY,
+        "x_label": "Shift (R-L)",
+        "y_label": "Shift (A-P)",
     },
     "surfaces": {"label": "Arches", "section": INPUT},
     "reference": {"label": "Register onto", "section": INPUT},
