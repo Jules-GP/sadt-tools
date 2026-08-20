@@ -57,18 +57,17 @@ def run(
     tooth_anterior_left: int = 11,
     tooth_posterior_right: int = 3,
     tooth_posterior_left: int = 14,
-    # How far along each tooth the patch boundary sits, 0 to 1.
-    ratio_anterior_right: float = 0.5,
-    ratio_anterior_left: float = 0.5,
-    ratio_posterior_right: float = 0.5,
-    ratio_posterior_left: float = 0.5,
-    # Millimetres added to each corner after the ratio places it.
-    adjust_anterior_right: float = 0.0,
-    adjust_anterior_left: float = 0.0,
-    adjust_posterior_right: float = 0.0,
-    adjust_posterior_left: float = 0.0,
-    shift_lr: float = 0.0,
-    shift_ap: float = 0.0,
+    # Each corner is ONE position, not two settings: how far along its tooth the
+    # boundary sits (0 at mid-arch, 1 on the tooth) and how far it moves fore or
+    # aft in millimetres. Declared as a pair so the panel gives it a 2D pad whose
+    # knob sits where the point sits on the arch; two number fields state two
+    # numbers and cannot state that. See layout.py for the axes.
+    anterior_right: tuple[float, float] = (0.5, 0.0),
+    anterior_left: tuple[float, float] = (0.5, 0.0),
+    posterior_right: tuple[float, float] = (0.5, 0.0),
+    posterior_left: tuple[float, float] = (0.5, 0.0),
+    # The whole patch, moved rigidly: left-right and antero-posterior, in mm.
+    shift: tuple[float, float] = (0.0, 0.0),
     output_suffix: str = "_Reg",
 ) -> Path:
     """Build a registration patch on intraoral surfaces, and register them.
@@ -87,16 +86,12 @@ def run(
         tooth_anterior_left: Universal number of the anterior left tooth.
         tooth_posterior_right: Universal number of the posterior right tooth.
         tooth_posterior_left: Universal number of the posterior left tooth.
-        ratio_anterior_right: Where the boundary sits along that tooth, 0 to 1.
-        ratio_anterior_left: Where the boundary sits along that tooth, 0 to 1.
-        ratio_posterior_right: Where the boundary sits along that tooth, 0 to 1.
-        ratio_posterior_left: Where the boundary sits along that tooth, 0 to 1.
-        adjust_anterior_right: Millimetres added to that corner.
-        adjust_anterior_left: Millimetres added to that corner.
-        adjust_posterior_right: Millimetres added to that corner.
-        adjust_posterior_left: Millimetres added to that corner.
-        shift_lr: Millimetres the whole patch is moved left or right.
-        shift_ap: Millimetres the whole patch is moved forward or back.
+        anterior_right: Where the anterior right corner sits: ratio along its
+            tooth (0 at mid-arch, 1 on the tooth) and millimetres fore or aft.
+        anterior_left: The same, for the anterior left corner.
+        posterior_right: The same, for the posterior right corner.
+        posterior_left: The same, for the posterior left corner.
+        shift: Millimetres the whole patch moves, left-right then fore-aft.
         output_suffix: Appended to each written file's name.
 
     Returns:
@@ -125,18 +120,14 @@ def run(
         "posterior_right": tooth_posterior_right,
         "posterior_left": tooth_posterior_left,
     }
-    ratios = {
-        "anterior_right": ratio_anterior_right,
-        "anterior_left": ratio_anterior_left,
-        "posterior_right": ratio_posterior_right,
-        "posterior_left": ratio_posterior_left,
+    corners = {
+        "anterior_right": anterior_right,
+        "anterior_left": anterior_left,
+        "posterior_right": posterior_right,
+        "posterior_left": posterior_left,
     }
-    adjustments = {
-        "anterior_right": adjust_anterior_right,
-        "anterior_left": adjust_anterior_left,
-        "posterior_right": adjust_posterior_right,
-        "posterior_left": adjust_posterior_left,
-    }
+    ratios = {key: pair[0] for key, pair in corners.items()}
+    adjustments = {key: pair[1] for key, pair in corners.items()}
 
     root = Path(surfaces)
     report = {"mode": mode, "patch": patch, "surfaces": {}}
@@ -152,7 +143,7 @@ def run(
             surface = read_surface(path)
 
             if mode in ("Patch", "Patch and register") and patch == "Palate (butterfly)":
-                build_butterfly(surface, teeth, ratios, adjustments, 1, shift_lr, shift_ap)
+                build_butterfly(surface, teeth, ratios, adjustments, 1, shift[0], shift[1])
                 merge_patches(surface)
                 entry["patch"] = BUTTERFLY_ARRAY
 

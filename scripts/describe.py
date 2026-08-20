@@ -98,7 +98,11 @@ LAYOUT_KEYS = ("section", "ui", "groups", "visible_when", "options_when", "label
                # the axis). Declared here with the other layout keys because a
                # tool writes them in the same place, but they are NOT
                # presentation: the server refuses a value outside them.
-               "x_range", "y_range")
+               "x_range", "y_range",
+               # Names for the two ends of each axis. Presentation, unlike the
+               # ranges: "0.8" says nothing about where that is in a mouth, and
+               # "mid"/"out" does.
+               "x_labels", "y_labels")
 
 LAYOUT_MODULE = "layout"
 

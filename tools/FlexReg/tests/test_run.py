@@ -260,3 +260,74 @@ def test_the_output_mirrors_the_input_tree(tmp_path):
 
     assert (tmp_path / "out" / "p1" / "arch_Reg.vtk").is_file()
     assert (tmp_path / "out" / "p2" / "arch_Reg.vtk").is_file()
+
+
+# ---------------------------------------------------------------------------
+# The corner pairs
+
+
+def test_a_corner_is_one_position_rather_than_two_settings(tmp_path):
+    """Each pair reaches the engine as (ratio, adjust), in that order.
+
+    Upstream had ten flat floats read off a Qt form. They are five pairs here so
+    the panel gives each corner a 2D pad whose knob sits where the point sits on
+    the arch; getting the order backwards would move a corner sideways when the
+    clinician pushed it forward, which nothing downstream could detect.
+    """
+    seen = {}
+
+    def _capture(surface, teeth, ratios, adjustments, index, shift_lr, shift_ap):
+        seen.update(ratios=dict(ratios), adjustments=dict(adjustments),
+                    shift=(shift_lr, shift_ap))
+        return surface
+
+    import sadt_flexreg as tool
+    original = tool.build_butterfly
+    tool.build_butterfly = _capture
+    try:
+        _write_surface(tmp_path / "arch.vtk")
+        tool.run(
+            surfaces=tmp_path / "arch.vtk",
+            output_dir=tmp_path / "out",
+            mode="Patch",
+            anterior_right=(0.8, -2.0),
+            shift=(3.0, -4.0),
+        )
+    finally:
+        tool.build_butterfly = original
+
+    assert seen["ratios"]["anterior_right"] == 0.8
+    assert seen["adjustments"]["anterior_right"] == -2.0
+    assert seen["shift"] == (3.0, -4.0)
+
+
+def test_every_corner_keeps_its_own_pair(tmp_path):
+    """Four pads, four corners: a transposition here would be invisible in a
+    report and visible only as a misplaced patch."""
+    seen = {}
+
+    def _capture(surface, teeth, ratios, adjustments, index, shift_lr, shift_ap):
+        seen.update(ratios=dict(ratios), adjustments=dict(adjustments))
+        return surface
+
+    import sadt_flexreg as tool
+    original = tool.build_butterfly
+    tool.build_butterfly = _capture
+    try:
+        _write_surface(tmp_path / "arch.vtk")
+        tool.run(
+            surfaces=tmp_path / "arch.vtk", output_dir=tmp_path / "out", mode="Patch",
+            anterior_right=(0.1, 1.0), anterior_left=(0.2, 2.0),
+            posterior_right=(0.3, 3.0), posterior_left=(0.4, 4.0),
+        )
+    finally:
+        tool.build_butterfly = original
+
+    assert seen["ratios"] == {
+        "anterior_right": 0.1, "anterior_left": 0.2,
+        "posterior_right": 0.3, "posterior_left": 0.4,
+    }
+    assert seen["adjustments"] == {
+        "anterior_right": 1.0, "anterior_left": 2.0,
+        "posterior_right": 3.0, "posterior_left": 4.0,
+    }
