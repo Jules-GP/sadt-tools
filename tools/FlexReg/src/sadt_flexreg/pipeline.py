@@ -152,9 +152,12 @@ def build_butterfly(surface, teeth, ratios, adjustments, index, shift_lr, shift_
     except ToothNoExist as missing:
         # Upstream let this reach the CLI's top level, where Slicer showed the
         # traceback. It names a tooth the caller chose, so it is theirs to fix.
+        # The engine's own sentence, passed through rather than wrapped: it
+        # already reads "This tooth UR6 is not segmented or doesnt exist", and
+        # prefixing it produced "This surface has no tooth This tooth UR6...".
         raise ToolInputError(
-            "This surface has no tooth {}. Pick teeth its label array actually "
-            "carries.".format(missing)
+            "{}. Pick teeth this surface's label array actually carries -- a "
+            "lower arch has none of the palate teeth.".format(str(missing).strip())
         )
     return surface
 

@@ -175,18 +175,23 @@ def run(
             entry = {"status": "failed", "error": str(refused)}
         report["surfaces"][relative] = entry
 
-    if not produced:
-        raise ToolInputError(
-            "None of the {} surface(s) could be processed; the per-surface "
-            "reasons are in the report.".format(len(report["surfaces"]))
-        )
-
     report["summary"] = {
         "total": len(report["surfaces"]),
         "processed": sum(1 for e in report["surfaces"].values() if e.get("status") == "ok"),
         "failed": sum(1 for e in report["surfaces"].values() if e.get("status") == "failed"),
     }
-
+    # Written BEFORE the refusal below, because that refusal points at it. A run
+    # where nothing worked is exactly the one whose per-surface reasons someone
+    # needs, and it was the one case that wrote no report at all.
     report_path = output_dir / "FlexReg_report.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    if not produced:
+        first = next((entry.get("error") for entry in report["surfaces"].values()
+                      if entry.get("error")), "")
+        raise ToolInputError(
+            "None of the {} surface(s) could be processed. {} See {} for the "
+            "rest.".format(len(report["surfaces"]), first, report_path.name)
+        )
+
     return output_dir

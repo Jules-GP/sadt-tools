@@ -331,3 +331,38 @@ def test_every_corner_keeps_its_own_pair(tmp_path):
         "anterior_right": 1.0, "anterior_left": 2.0,
         "posterior_right": 3.0, "posterior_left": 4.0,
     }
+
+
+def test_a_tooth_the_arch_does_not_have_fails_the_surface(tmp_path, monkeypatch):
+    """Upstream logged `ToothNoExist` and returned.
+
+    A lower arch has none of the palate teeth, so every run on one wrote the
+    mesh back with no Butterfly array and reported "1 processed, 0 failed" --
+    a success with nothing in it. Found by running the lower arch test file.
+    """
+    from sadt_flexreg import make_butterfly
+    from sadt_flexreg.util import ToothNoExist
+
+    def _missing(**_kwargs):
+        raise ToothNoExist("UR6")
+
+    monkeypatch.setattr(make_butterfly, "butterflyPatch", _missing)
+    _write_surface(tmp_path / "lower.vtk")
+
+    with pytest.raises(ToolInputError, match="None of the"):
+        sadt_flexreg.run(surfaces=tmp_path / "lower.vtk",
+                         output_dir=tmp_path / "out", mode="Patch")
+
+    report = json.loads((tmp_path / "out" / "FlexReg_report.json").read_text())
+    assert report["summary"] == {"total": 1, "processed": 0, "failed": 1}
+
+
+def test_a_run_where_nothing_worked_still_writes_its_report(tmp_path):
+    """The refusal points at the report, so the report has to exist. It was the
+    one case that wrote none."""
+    (tmp_path / "bad.vtk").write_bytes(b"truncated")
+
+    with pytest.raises(ToolInputError, match="FlexReg_report.json"):
+        sadt_flexreg.run(surfaces=tmp_path, output_dir=tmp_path / "out", mode="Patch")
+
+    assert (tmp_path / "out" / "FlexReg_report.json").is_file()

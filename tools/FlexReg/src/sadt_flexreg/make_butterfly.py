@@ -83,9 +83,13 @@ def butterflyPatch(surf,
                                    ['3','5','12','14'])
         centroid = centroidf(surf_tmp)
 
-    except ToothNoExist as error:
-        logger.error(f' Error {error}')
-        return
+    except ToothNoExist:
+        # RAISED, not logged and swallowed. Upstream returned here, so a run on
+        # an arch whose teeth are absent -- a lower arch, where the palate teeth
+        # simply do not exist -- wrote the mesh back with no Butterfly array and
+        # reported success. The caller names the four teeth, so this is theirs
+        # to fix and has to reach them.
+        raise
     
     ratio_anterior_left = (1 - ratio_anterior_left)/2
     ratio_anterior_right = (1 - ratio_anterior_right)/2
